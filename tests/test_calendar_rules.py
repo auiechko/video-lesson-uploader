@@ -58,6 +58,17 @@ class CalendarClassificationTests(unittest.TestCase):
         self.assertEqual(parsed.status, CalendarEventStatus.IGNORED_CANCELLED)
         self.assertEqual(parsed.cancellation_source, CancellationSource.TEACHER)
 
+    def test_other_configured_cancellation_source_is_kept_as_other(self) -> None:
+        parsed = parse_calendar_event(
+            event(
+                "ВП адміністратор 105853087 Наталія "
+                "(Святослав 14) Учко ТГ"
+            )
+        )
+
+        self.assertEqual(parsed.status, CalendarEventStatus.IGNORED_CANCELLED)
+        self.assertEqual(parsed.cancellation_source, CancellationSource.OTHER)
+
     def test_letters_inside_another_word_do_not_mean_cancellation(self) -> None:
         parsed = parse_calendar_event(
             event("105853087 Вправи (Святослав 14 років) Учко ТГ")
@@ -322,6 +333,10 @@ class CalendarSnapshotValidationTests(unittest.TestCase):
             )
 
         self.assertIn("student_age", captured.exception.changes["event-1"])
+        self.assertIn(
+            "student_age: 14 → 15",
+            str(captured.exception),
+        )
         self.assertEqual(build_calendar_snapshot(current).student_age, 15)
 
     def test_unchanged_current_calendar_event_passes_validation(self) -> None:

@@ -19,6 +19,7 @@ class AppConfig:
     google_client_secrets: str = ""
     google_calendar_id: str = "primary"
     google_timezone: str = "Europe/Kyiv"
+    calendar_conflict_tolerance_minutes: int = 10
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -64,6 +65,10 @@ def load_config(path: Path | None = None) -> AppConfig:
     google_client_secrets = google_calendar.get("client_secrets", "")
     google_calendar_id = google_calendar.get("calendar_id", "primary")
     google_timezone = google_calendar.get("timezone", "Europe/Kyiv")
+    calendar_conflict_tolerance_minutes = google_calendar.get(
+        "calendar_conflict_tolerance_minutes",
+        10,
+    )
     for name, value in (
         ("google_calendar.client_secrets", google_client_secrets),
         ("google_calendar.calendar_id", google_calendar_id),
@@ -75,6 +80,15 @@ def load_config(path: Path | None = None) -> AppConfig:
         raise ValueError("google_calendar.calendar_id must be non-empty")
     if not google_timezone.strip():
         raise ValueError("google_calendar.timezone must be non-empty")
+    if (
+        not isinstance(calendar_conflict_tolerance_minutes, int)
+        or isinstance(calendar_conflict_tolerance_minutes, bool)
+        or calendar_conflict_tolerance_minutes < 0
+    ):
+        raise ValueError(
+            "google_calendar.calendar_conflict_tolerance_minutes "
+            "must be a non-negative integer"
+        )
     return AppConfig(
         album_batch=template,
         api_id=api_id,
@@ -84,6 +98,9 @@ def load_config(path: Path | None = None) -> AppConfig:
         google_client_secrets=google_client_secrets.strip(),
         google_calendar_id=google_calendar_id.strip(),
         google_timezone=google_timezone.strip(),
+        calendar_conflict_tolerance_minutes=(
+            calendar_conflict_tolerance_minutes
+        ),
     )
 
 
@@ -105,6 +122,10 @@ def save_config(path: Path, config: AppConfig) -> None:
         ),
         f"calendar_id = {json.dumps(config.google_calendar_id, ensure_ascii=False)}",
         f"timezone = {json.dumps(config.google_timezone, ensure_ascii=False)}",
+        (
+            "calendar_conflict_tolerance_minutes = "
+            f"{config.calendar_conflict_tolerance_minutes}"
+        ),
         "",
         "[caption]",
         f"album_batch = {json.dumps(config.album_batch, ensure_ascii=False)}",

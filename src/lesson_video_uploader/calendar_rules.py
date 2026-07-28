@@ -144,6 +144,7 @@ class CalendarEventSnapshot:
     is_transferred: bool
     is_cancelled: bool
     is_pause: bool
+    calendar_id: str = "primary"
 
 
 class BatchRevalidationRequired(RuntimeError):
@@ -155,10 +156,16 @@ class BatchRevalidationRequired(RuntimeError):
             event_id: dict(event_changes)
             for event_id, event_changes in changes.items()
         }
-        event_ids = ", ".join(sorted(self.changes))
+        details = []
+        for event_id in sorted(self.changes):
+            rendered = ", ".join(
+                f"{field}: {old} → {new}"
+                for field, (old, new) in self.changes[event_id].items()
+            )
+            details.append(f"{event_id}: {rendered}")
         super().__init__(
-            "BATCH_REVALIDATION_REQUIRED: Google Calendar змінився "
-            f"для подій: {event_ids}"
+            "BATCH_REVALIDATION_REQUIRED: Google Calendar змінився.\n"
+            + "\n".join(details)
         )
 
 
@@ -307,6 +314,7 @@ def build_calendar_snapshot(
         is_transferred=event.is_transferred,
         is_cancelled=event.status is CalendarEventStatus.IGNORED_CANCELLED,
         is_pause=event.status is CalendarEventStatus.IGNORED_PAUSE,
+        calendar_id=event.calendar_id,
     )
 
 

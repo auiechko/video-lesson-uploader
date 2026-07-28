@@ -3,12 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import AppConfig, load_config, save_config
 from .credentials import CredentialStore, resolve_api_hash
 from .manifest import UploadManifest
-from .models import Lesson, LessonDetails
+from .models import Lesson, LessonDetails, LessonSendMode
 from .planning import build_caption
+
+if TYPE_CHECKING:
+    from .calendar_rules import CalendarEventSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +31,11 @@ class LessonForm:
     duration_hours: int
     is_trial: bool
     video_paths: tuple[Path, ...]
+    student_age: int | None = None
+    calendar_status: str = "NORMAL"
+    is_no_recording: bool = False
+    is_transferred: bool = False
+    calendar_snapshot: CalendarEventSnapshot | None = None
 
 
 class DesktopSettingsController:
@@ -78,6 +87,9 @@ class DesktopSettingsController:
             google_client_secrets=current.google_client_secrets,
             google_calendar_id=current.google_calendar_id,
             google_timezone=current.google_timezone,
+            calendar_conflict_tolerance_minutes=(
+                current.calendar_conflict_tolerance_minutes
+            ),
         )
         save_config(self.config_path, config)
         if api_hash.strip():
@@ -157,26 +169,39 @@ def create_lesson_from_form(
             raise ValueError(f"Підтримуються лише MP4: {path.name}")
         if not path.is_file():
             raise ValueError(f"Відео не знайдено: {path}")
+    caption = build_caption(
+        date=event_start.date(),
+        student_id=form.student_id,
+        student_name=form.student_name,
+        lesson_label=form.lesson_label,
+        duration_hours=form.duration_hours,
+        is_trial=form.is_trial,
+    )
+    if form.is_no_recording:
+        caption += " (без запису)"
     return Lesson(
         profile_id=profile_id.strip(),
         batch_id=batch_id.strip(),
         calendar_event_id=form.calendar_event_id.strip(),
         event_start=event_start,
-        caption=build_caption(
-            date=event_start.date(),
-            student_id=form.student_id,
-            student_name=form.student_name,
-            lesson_label=form.lesson_label,
-            duration_hours=form.duration_hours,
-            is_trial=form.is_trial,
-        ),
+        caption=caption,
         ordered_video_paths=form.video_paths,
+        send_mode=(
+            LessonSendMode.TEXT_ONLY
+            if form.is_no_recording
+            else LessonSendMode.MEDIA
+        ),
+        calendar_snapshot=form.calendar_snapshot,
         details=LessonDetails(
             student_id=form.student_id.strip(),
             student_name=form.student_name.strip(),
             lesson_label=form.lesson_label.strip(),
             duration_hours=form.duration_hours,
             is_trial=form.is_trial,
+            student_age=form.student_age,
+            calendar_status=form.calendar_status,
+            is_no_recording=form.is_no_recording,
+            is_transferred=form.is_transferred,
         ),
     )
 
@@ -192,13 +217,22 @@ def form_from_lesson(lesson: Lesson) -> LessonForm:
     details = lesson.details
     return LessonForm(
         calendar_event_id=lesson.calendar_event_id,
-        event_start=lesson.event_start.strftime("%Y-%m-%d %H:%M"),
+        event_start=(
+            lesson.event_start.isoformat(timespec="minutes")
+            if lesson.calendar_snapshot is not None
+            else lesson.event_start.strftime("%Y-%m-%d %H:%M")
+        ),
         student_id=details.student_id if details else "",
         student_name=details.student_name if details else "",
         lesson_label=details.lesson_label if details else "",
         duration_hours=details.duration_hours if details else 1,
         is_trial=details.is_trial if details else False,
         video_paths=lesson.ordered_video_paths,
+        student_age=details.student_age if details else None,
+        calendar_status=details.calendar_status if details else "NORMAL",
+        is_no_recording=details.is_no_recording if details else False,
+        is_transferred=details.is_transferred if details else False,
+        calendar_snapshot=lesson.calendar_snapshot,
     )
 
 

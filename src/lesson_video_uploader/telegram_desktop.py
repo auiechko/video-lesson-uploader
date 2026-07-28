@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
+from .calendar_rules import (
+    BatchRevalidationRequired,
+    CalendarEventSnapshot,
+)
 from .config import AppConfig
 from .manifest import UploadManifest
 from .models import Lesson, SendStatus
@@ -123,6 +128,10 @@ class TelegramAuthService:
 
 StatusCallback = Callable[[str], object]
 ProgressCallback = Callable[[int, int], object]
+CalendarRevalidator = Callable[
+    [Mapping[str, CalendarEventSnapshot]],
+    Awaitable[None],
+]
 
 
 class TelegramDesktopService:
@@ -148,7 +157,34 @@ class TelegramDesktopService:
         target_peer: object,
         status_callback: StatusCallback | None = None,
         progress_callback: ProgressCallback | None = None,
+        calendar_revalidator: CalendarRevalidator | None = None,
     ) -> tuple[Lesson, ...]:
+        snapshots = {
+            lesson.calendar_event_id: lesson.calendar_snapshot
+            for lesson in manifest.lessons
+            if lesson.calendar_snapshot is not None
+        }
+        if snapshots:
+            try:
+                if calendar_revalidator is None:
+                    raise BatchRevalidationRequired({
+                        event_id: {
+                            "validation": (
+                                "Calendar snapshot",
+                                "revalidator is not configured",
+                            )
+                        }
+                        for event_id in snapshots
+                    })
+                await calendar_revalidator(snapshots)
+            except BatchRevalidationRequired:
+                repository = SQLiteSendItemRepository(self.database_path)
+                for lesson in manifest.lessons:
+                    repository.save(replace(
+                        lesson,
+                        status=SendStatus.BATCH_REVALIDATION_REQUIRED,
+                    ))
+                raise
         client = self._client(config, api_hash)
         await client.connect()
         try:
