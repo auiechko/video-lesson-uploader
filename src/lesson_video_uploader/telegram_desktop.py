@@ -16,6 +16,7 @@ from .models import Lesson, SendStatus
 from .persistence import SQLiteSendItemRepository
 from .reconciliation import TelegramDeliveryReconciler
 from .sender import ManualReviewRequired, TelethonLessonSender
+from .telegram_runtime import create_telegram_client
 
 
 class TelegramLoginRequired(RuntimeError):
@@ -33,7 +34,7 @@ class DesktopTelethonClient(Protocol):
     async def is_user_authorized(self) -> bool: ...
 
 
-ClientFactory = Callable[[str, int, str], DesktopTelethonClient]
+ClientFactory = Callable[..., DesktopTelethonClient]
 
 
 def telethon_components() -> tuple[ClientFactory, type[BaseException]]:
@@ -47,20 +48,6 @@ def telethon_components() -> tuple[ClientFactory, type[BaseException]]:
     return TelegramClient, SessionPasswordNeededError
 
 
-def _validate_credentials(config: AppConfig, api_hash: str) -> tuple[int, str]:
-    if config.api_id is None or config.api_id <= 0:
-        raise ValueError("Спочатку збережіть Telegram API ID")
-    if not api_hash:
-        raise ValueError("Спочатку збережіть Telegram API hash")
-    return config.api_id, api_hash
-
-
-def _ensure_session_parent(session: str) -> None:
-    parent = Path(session).expanduser().parent
-    if parent != Path("."):
-        parent.mkdir(parents=True, exist_ok=True)
-
-
 class TelegramAuthService:
     def __init__(
         self,
@@ -71,15 +58,29 @@ class TelegramAuthService:
         self.client_factory = client_factory
         self.password_required_error = password_required_error
 
-    def _client(self, config: AppConfig, api_hash: str) -> DesktopTelethonClient:
-        api_id, secret = _validate_credentials(config, api_hash)
-        _ensure_session_parent(config.session)
-        return self.client_factory(config.session, api_id, secret)
+    def _client(
+        self,
+        config: AppConfig,
+        api_hash: str,
+        profile_id: str,
+    ) -> DesktopTelethonClient:
+        return create_telegram_client(
+            self.client_factory,
+            profile_id=profile_id,
+            api_id=config.api_id,
+            api_hash=api_hash,
+        )
 
-    async def request_code(self, config: AppConfig, api_hash: str) -> str:
+    async def request_code(
+        self,
+        config: AppConfig,
+        api_hash: str,
+        *,
+        profile_id: str = "main",
+    ) -> str:
         if not config.phone:
             raise ValueError("Спочатку збережіть номер телефону Telegram")
-        client = self._client(config, api_hash)
+        client = self._client(config, api_hash, profile_id)
         await client.connect()
         try:
             sent = await client.send_code_request(config.phone)  # type: ignore[attr-defined]
@@ -94,8 +95,9 @@ class TelegramAuthService:
         *,
         code: str,
         phone_code_hash: str,
+        profile_id: str = "main",
     ) -> LoginResult:
-        client = self._client(config, api_hash)
+        client = self._client(config, api_hash, profile_id)
         await client.connect()
         try:
             try:
@@ -116,8 +118,9 @@ class TelegramAuthService:
         api_hash: str,
         *,
         password: str,
+        profile_id: str = "main",
     ) -> LoginResult:
-        client = self._client(config, api_hash)
+        client = self._client(config, api_hash, profile_id)
         await client.connect()
         try:
             await client.sign_in(password=password)  # type: ignore[attr-defined]
@@ -143,10 +146,18 @@ class TelegramDesktopService:
         self.client_factory = client_factory
         self.database_path = database_path
 
-    def _client(self, config: AppConfig, api_hash: str) -> DesktopTelethonClient:
-        api_id, secret = _validate_credentials(config, api_hash)
-        _ensure_session_parent(config.session)
-        return self.client_factory(config.session, api_id, secret)
+    def _client(
+        self,
+        config: AppConfig,
+        api_hash: str,
+        profile_id: str,
+    ) -> DesktopTelethonClient:
+        return create_telegram_client(
+            self.client_factory,
+            profile_id=profile_id,
+            api_id=config.api_id,
+            api_hash=api_hash,
+        )
 
     async def send_manifest(
         self,
@@ -185,7 +196,7 @@ class TelegramDesktopService:
                         status=SendStatus.BATCH_REVALIDATION_REQUIRED,
                     ))
                 raise
-        client = self._client(config, api_hash)
+        client = self._client(config, api_hash, manifest.profile_id)
         await client.connect()
         try:
             if not await client.is_user_authorized():
@@ -234,7 +245,7 @@ class TelegramDesktopService:
         target_peer: object,
         status_callback: StatusCallback | None = None,
     ) -> tuple[Lesson, ...]:
-        client = self._client(config, api_hash)
+        client = self._client(config, api_hash, manifest.profile_id)
         await client.connect()
         try:
             if not await client.is_user_authorized():

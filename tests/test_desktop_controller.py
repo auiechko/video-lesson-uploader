@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
 
 from lesson_video_uploader.models import Lesson
 from lesson_video_uploader.desktop_controller import (
@@ -93,9 +91,8 @@ class DesktopSettingsControllerTests(unittest.TestCase):
                 Path(directory) / "config.toml",
                 FakeCredentialStore(),
             )
-            with patch.dict(os.environ, {}, clear=True):
-                with self.assertRaisesRegex(ValueError, "API hash"):
-                    controller.require_api_hash()
+            with self.assertRaisesRegex(ValueError, "API hash"):
+                controller.require_api_hash()
 
     def test_google_calendar_settings_preserve_telegram_configuration(self) -> None:
         credentials = FakeCredentialStore()
@@ -116,21 +113,22 @@ class DesktopSettingsControllerTests(unittest.TestCase):
             )
 
         self.assertEqual(result.config.api_id, 123456)
-        self.assertEqual(result.config.session, "telegram-session")
+        self.assertTrue(Path(result.config.session).is_absolute())
+        self.assertEqual(Path(result.config.session).name, "telegram")
         self.assertEqual(
             result.config.google_client_secrets,
             "C:/google/credentials.json",
         )
         self.assertEqual(credentials.value, "telegram-secret")
 
-    def test_environment_variable_is_accepted_instead_of_the_vault(self) -> None:
+    def test_environment_variable_is_not_used_instead_of_keyring(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             controller = DesktopSettingsController(
                 Path(directory) / "config.toml",
                 FakeCredentialStore(),
             )
-            with patch.dict(os.environ, {"TELEGRAM_API_HASH": "from-env"}, clear=True):
-                self.assertEqual(controller.require_api_hash(), "from-env")
+            with self.assertRaisesRegex(ValueError, "API hash"):
+                controller.require_api_hash()
 
 
 class TargetPeerTests(unittest.TestCase):
