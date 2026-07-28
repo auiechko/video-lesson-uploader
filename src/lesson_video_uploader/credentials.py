@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import ctypes
-import os
 from typing import Any, Protocol
 
 
@@ -11,144 +9,131 @@ class CredentialStore(Protocol):
     def delete_secret(self) -> None: ...
 
 
-def _windows_api() -> tuple[Any, type[ctypes.Structure]]:
-    """Load Advapi32 and describe the CREDENTIALW layout it expects.
-
-    Both are built on first use instead of at import time: ``ctypes.wintypes``
-    raises on any non-Windows interpreter, and this module has to stay
-    importable there so the Linux test run can reach the desktop code.
-    """
-    if os.name != "nt":
-        raise RuntimeError("Windows Credential Manager is available only on Windows")
-    from ctypes import wintypes
-
-    class _CREDENTIALW(ctypes.Structure):
-        _fields_ = [
-            ("Flags", wintypes.DWORD),
-            ("Type", wintypes.DWORD),
-            ("TargetName", wintypes.LPWSTR),
-            ("Comment", wintypes.LPWSTR),
-            ("LastWritten", wintypes.FILETIME),
-            ("CredentialBlobSize", wintypes.DWORD),
-            ("CredentialBlob", ctypes.POINTER(wintypes.BYTE)),
-            ("Persist", wintypes.DWORD),
-            ("AttributeCount", wintypes.DWORD),
-            ("Attributes", wintypes.LPVOID),
-            ("TargetAlias", wintypes.LPWSTR),
-            ("UserName", wintypes.LPWSTR),
-        ]
-
-    api = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
-    api.CredReadW.argtypes = [
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        ctypes.POINTER(ctypes.POINTER(_CREDENTIALW)),
-    ]
-    api.CredReadW.restype = wintypes.BOOL
-    api.CredWriteW.argtypes = [ctypes.POINTER(_CREDENTIALW), wintypes.DWORD]
-    api.CredWriteW.restype = wintypes.BOOL
-    api.CredDeleteW.argtypes = [
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-    ]
-    api.CredDeleteW.restype = wintypes.BOOL
-    api.CredFree.argtypes = [wintypes.LPVOID]
-    api.CredFree.restype = None
-    return api, _CREDENTIALW
+class SecretStoreError(RuntimeError):
+    """A secret could not be accessed through the configured keyring."""
 
 
-class WindowsCredentialStore:
-    """Store the Telegram API hash in Windows Credential Manager."""
-
-    _CRED_TYPE_GENERIC = 1
-    _CRED_PERSIST_LOCAL_MACHINE = 2
-    _ERROR_NOT_FOUND = 1168
+class KeyringSecretStore:
+    SERVICE_NAME = "LessonVideoUploader"
+    TELEGRAM_API_HASH = "telegram_api_hash"
 
     def __init__(
         self,
-        target_name: str = "lesson-video-uploader/telegram-api-hash",
-        username: str = "telegram",
+        *,
+        profile_id: str = "main",
+        credential_name: str = TELEGRAM_API_HASH,
+        backend: Any | None = None,
     ) -> None:
-        self.target_name = target_name
-        self.username = username
+        self.profile_id = self._validated_part(profile_id, "profile ID")
+        self.credential_name = self._validated_part(
+            credential_name,
+            "credential name",
+        )
+        self._injected_backend = backend
 
-    def get_secret(self) -> str | None:
-        api, credential_type = _windows_api()
-        pointer = ctypes.POINTER(credential_type)()
-        if not api.CredReadW(
-            self.target_name,
-            self._CRED_TYPE_GENERIC,
-            0,
-            ctypes.byref(pointer),
-        ):
-            error = ctypes.get_last_error()
-            if error == self._ERROR_NOT_FOUND:
-                return None
-            raise ctypes.WinError(error)
+    @property
+    def _backend(self) -> Any:
+        if self._injected_backend is not None:
+            return self._injected_backend
+        import keyring
+
+        return keyring
+
+    @staticmethod
+    def _validated_part(value: str, label: str) -> str:
+        normalized = value.strip()
+        if not normalized or ":" in normalized:
+            raise ValueError(f"{label} має бути непорожнім і не містити ':'")
+        return normalized
+
+    def _account(
+        self,
+        profile_id: str | None = None,
+        credential_name: str | None = None,
+    ) -> str:
+        profile = self._validated_part(
+            profile_id if profile_id is not None else self.profile_id,
+            "profile ID",
+        )
+        credential = self._validated_part(
+            credential_name
+            if credential_name is not None
+            else self.credential_name,
+            "credential name",
+        )
+        return f"{profile}:{credential}"
+
+    @staticmethod
+    def _access_error(operation: str) -> SecretStoreError:
+        return SecretStoreError(
+            "Не вдалося "
+            f"{operation} секрет захищеного сховища Windows. "
+            "Перевірте доступність системного сховища облікових даних."
+        )
+
+    def _set(self, account: str, value: str) -> None:
         try:
-            credential = pointer.contents
-            raw = ctypes.string_at(
-                credential.CredentialBlob,
-                credential.CredentialBlobSize,
-            )
-            return raw.decode("utf-16-le")
-        finally:
-            api.CredFree(pointer)
+            self._backend.set_password(self.SERVICE_NAME, account, value)
+        except self._backend.errors.KeyringError as error:
+            raise self._access_error("зберегти") from error
+
+    def _get(self, account: str) -> str | None:
+        try:
+            return self._backend.get_password(self.SERVICE_NAME, account)
+        except self._backend.errors.KeyringError as error:
+            raise self._access_error("прочитати") from error
+
+    def _delete(self, account: str) -> None:
+        try:
+            self._backend.delete_password(self.SERVICE_NAME, account)
+        except self._backend.errors.PasswordDeleteError:
+            pass
+        except self._backend.errors.KeyringError as error:
+            raise self._access_error("видалити") from error
+
+    def set_telegram_api_hash(self, profile_id: str, api_hash: str) -> None:
+        secret = api_hash.strip()
+        if not secret:
+            raise ValueError("Telegram API hash не може бути порожнім")
+        self._set(
+            self._account(profile_id, self.TELEGRAM_API_HASH),
+            secret,
+        )
+
+    def get_telegram_api_hash(self, profile_id: str) -> str | None:
+        return self._get(self._account(profile_id, self.TELEGRAM_API_HASH))
+
+    def delete_telegram_api_hash(self, profile_id: str) -> None:
+        self._delete(self._account(profile_id, self.TELEGRAM_API_HASH))
 
     def set_secret(self, secret: str) -> None:
-        if not secret:
-            raise ValueError("secret cannot be empty")
-        api, credential_type = _windows_api()
-        encoded = secret.encode("utf-16-le")
-        blob = ctypes.create_string_buffer(encoded)
-        credential = credential_type()
-        credential.Type = self._CRED_TYPE_GENERIC
-        credential.TargetName = self.target_name
-        credential.CredentialBlobSize = len(encoded)
-        credential.CredentialBlob = ctypes.cast(
-            blob,
-            ctypes.POINTER(ctypes.c_byte),
-        )
-        credential.Persist = self._CRED_PERSIST_LOCAL_MACHINE
-        credential.UserName = self.username
-        if not api.CredWriteW(ctypes.byref(credential), 0):
-            raise ctypes.WinError(ctypes.get_last_error())
+        normalized = secret.strip()
+        if not normalized:
+            raise ValueError("Секрет не може бути порожнім")
+        self._set(self._account(), normalized)
+
+    def get_secret(self) -> str | None:
+        return self._get(self._account())
 
     def delete_secret(self) -> None:
-        api, _ = _windows_api()
-        if not api.CredDeleteW(
-            self.target_name,
-            self._CRED_TYPE_GENERIC,
-            0,
-        ):
-            error = ctypes.get_last_error()
-            if error != self._ERROR_NOT_FOUND:
-                raise ctypes.WinError(error)
+        self._delete(self._account())
 
 
 def resolve_api_hash(
-    env_name: str,
-    store: CredentialStore | None = None,
+    profile_id: str,
+    store: CredentialStore | KeyringSecretStore | None = None,
 ) -> str:
-    """Find the Telegram api_hash wherever the user happened to put it.
-
-    The GUI writes it to Windows Credential Manager and the CLI has always
-    read an environment variable; both entry points go through here so a
-    secret saved in one is usable from the other. The variable wins, which
-    keeps an explicit override working on machines without the vault.
-    """
-    from_environment = os.environ.get(env_name, "").strip()
-    if from_environment:
-        return from_environment
-    if store is None and os.name == "nt":
-        store = WindowsCredentialStore()
-    if store is not None:
-        secret = (store.get_secret() or "").strip()
-        if secret:
-            return secret
-    raise ValueError(
-        "Telegram API hash не знайдено: збережіть його у Windows Credential "
-        f"Manager або задайте змінну середовища {env_name}"
+    secret_store = store or KeyringSecretStore()
+    profile_getter = getattr(secret_store, "get_telegram_api_hash", None)
+    secret = (
+        profile_getter(profile_id)
+        if callable(profile_getter)
+        else secret_store.get_secret()
     )
+    normalized = (secret or "").strip()
+    if not normalized:
+        raise ValueError(
+            "Telegram API hash не знайдено у захищеному сховищі. "
+            "Збережіть його в налаштуваннях."
+        )
+    return normalized

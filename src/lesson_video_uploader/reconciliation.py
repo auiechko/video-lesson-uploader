@@ -74,14 +74,19 @@ class TelegramDeliveryReconciler:
                 exact_deliveries.append(delivery)
                 latest_date = self._latest_date(exact[0], latest_date)
                 continue
-            partial = [
+            partial_matches = [
                 group for group in groups
                 if self._is_partial_match(group, plan, current.created_at)
             ]
-            if len(partial) == 1:
-                partial_deliveries.append(self._delivery(plan, partial[0]))
-                latest_date = self._latest_date(partial[0], latest_date)
-            elif len(partial) > 1:
+            if len(partial_matches) == 1:
+                partial_deliveries.append(
+                    self._delivery(plan, partial_matches[0])
+                )
+                latest_date = self._latest_date(
+                    partial_matches[0],
+                    latest_date,
+                )
+            elif len(partial_matches) > 1:
                 ambiguous = True
                 break
 
@@ -113,14 +118,14 @@ class TelegramDeliveryReconciler:
                 for delivery in found
                 for message_id in delivery.telegram_message_ids
             )
-            partial = replace(
+            partial_lesson = replace(
                 current,
                 telegram_message_ids=ids,
                 album_deliveries=tuple(found),
                 status=SendStatus.PARTIALLY_CONFIRMED,
             )
-            self.repository.save(partial)
-            return partial
+            self.repository.save(partial_lesson)
+            return partial_lesson
 
         unknown = replace(
             current,

@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 
 from lesson_video_uploader.config import (
-    AppConfig,
     DEFAULT_ALBUM_BATCH_TEMPLATE,
+    AppConfig,
     load_config,
     save_config,
 )
@@ -38,13 +38,12 @@ class ConfigTests(unittest.TestCase):
             path.write_text(
                 "[telegram]\n"
                 "api_id = 123456\n"
-                'api_hash_env = "MY_TELEGRAM_API_HASH"\n'
                 'session = "sessions/uploader"\n',
                 encoding="utf-8",
             )
             config = load_config(path)
         self.assertEqual(config.api_id, 123456)
-        self.assertEqual(config.api_hash_env, "MY_TELEGRAM_API_HASH")
+        self.assertFalse(hasattr(config, "api_hash"))
         self.assertEqual(config.session, "sessions/uploader")
 
     def test_invalid_album_template_is_rejected_early(self) -> None:
@@ -59,7 +58,6 @@ class ConfigTests(unittest.TestCase):
             path = Path(directory) / "config.toml"
             save_config(path, AppConfig(
                 api_id=123456,
-                api_hash_env="TELEGRAM_API_HASH",
                 session=".lesson-video-uploader/telegram",
                 phone="+380991234567",
             ))
@@ -68,6 +66,7 @@ class ConfigTests(unittest.TestCase):
             loaded = load_config(path)
 
         self.assertNotIn("api_hash =", text)
+        self.assertNotIn("api_hash_env", text)
         self.assertEqual(loaded.api_id, 123456)
         self.assertEqual(loaded.phone, "+380991234567")
 

@@ -15,7 +15,6 @@ from lesson_video_uploader.calendar_rules import (
 )
 from lesson_video_uploader.google_calendar import GoogleCalendarEvent
 
-
 KYIV = ZoneInfo("Europe/Kyiv")
 
 

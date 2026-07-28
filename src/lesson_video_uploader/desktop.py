@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 import threading
 import tkinter as tk
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime
+from functools import partial
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any, Coroutine, Mapping
 
-from .credentials import WindowsCredentialStore
 from .calendar_rules import (
     BatchRevalidationRequired,
     CalendarEventSnapshot,
@@ -18,6 +19,8 @@ from .calendar_rules import (
     resolve_calendar_slots,
     validate_calendar_snapshots,
 )
+from .credentials import KeyringSecretStore
+from .debug_logging import write_debug_exception
 from .desktop_controller import (
     DesktopSettingsController,
     LessonForm,
@@ -44,7 +47,6 @@ from .telegram_desktop import (
     telethon_components,
 )
 
-
 APP_TITLE = "Lesson Video Uploader"
 
 
@@ -58,14 +60,14 @@ class DesktopApplication:
         )
         self.settings = DesktopSettingsController(
             self.config_path,
-            WindowsCredentialStore(),
+            KeyringSecretStore(),
         )
         self.calendar_report_repository = SQLiteSendItemRepository(
             self.database_path
         )
-        self.google_token_store = WindowsCredentialStore(
-            target_name="lesson-video-uploader/google-calendar-oauth",
-            username="google-calendar",
+        self.google_token_store = KeyringSecretStore(
+            profile_id="main",
+            credential_name="google_calendar_oauth",
         )
         self.google_service: GoogleCalendarService | None = None
         self.google_events: list[GoogleCalendarEvent] = []
@@ -112,7 +114,7 @@ class DesktopApplication:
         self.api_id_var = tk.StringVar()
         self.api_hash_var = tk.StringVar()
         self.phone_var = tk.StringVar()
-        self.session_var = tk.StringVar(value=".lesson-video-uploader/telegram")
+        self.session_var = tk.StringVar()
         self.secret_status_var = tk.StringVar(value="API hash ще не збережений")
         self.status_var = tk.StringVar(value="Готово")
         self.progress_var = tk.DoubleVar(value=0)
@@ -217,7 +219,10 @@ class DesktopApplication:
         )
         self.log.pack(fill=tk.X, pady=(10, 0))
 
-    def _build_lesson_editor(self, parent: ttk.Frame) -> None:
+    def _build_lesson_editor(
+        self,
+        parent: ttk.Frame | ttk.LabelFrame,
+    ) -> None:
         self._labeled_entry(
             parent, "Calendar event ID", self.event_id_var, 0, 0, columnspan=3
         )
@@ -289,7 +294,10 @@ class DesktopApplication:
         parent.columnconfigure(3, weight=1)
         parent.rowconfigure(6, weight=1)
 
-    def _build_preview(self, parent: ttk.Frame) -> None:
+    def _build_preview(
+        self,
+        parent: ttk.Frame | ttk.LabelFrame,
+    ) -> None:
         columns = ("date", "caption", "videos", "telegram")
         self.lesson_tree = ttk.Treeview(
             parent,
@@ -458,7 +466,7 @@ class DesktopApplication:
             parent,
             text=(
                 "API ID зберігається у config.toml. API hash зберігається "
-                "окремо у Windows Credential Manager і не потрапляє в Git."
+                "через системний keyring і не потрапляє в Git."
             ),
             wraplength=820,
             style="Subtitle.TLabel",
@@ -479,7 +487,7 @@ class DesktopApplication:
         self._labeled_entry(parent, "Номер телефону", self.phone_var, 3, 0)
         self._labeled_entry(
             parent,
-            "Telethon session",
+            "Telethon session (автоматично)",
             self.session_var,
             4,
             0,
@@ -515,7 +523,7 @@ class DesktopApplication:
 
     @staticmethod
     def _labeled_entry(
-        parent: ttk.Frame,
+        parent: ttk.Frame | ttk.LabelFrame,
         label: str,
         variable: tk.StringVar,
         row: int,
@@ -528,7 +536,12 @@ class DesktopApplication:
         ttk.Label(parent, text=label).grid(
             row=row, column=column, sticky=tk.W, padx=(0, 6), pady=5
         )
-        entry = ttk.Entry(parent, textvariable=variable, width=width, show=show)
+        entry = ttk.Entry(
+            parent,
+            textvariable=variable,
+            width=width,
+            show=show or "",
+        )
         entry.grid(
             row=row,
             column=column + 1,
@@ -541,7 +554,7 @@ class DesktopApplication:
 
     def _load_settings(self) -> None:
         try:
-            loaded = self.settings.load()
+            loaded = self.settings.load(self.profile_var.get())
         except Exception as error:
             self._show_error(error)
             return
@@ -553,7 +566,7 @@ class DesktopApplication:
         self.google_calendar_var.set(config.google_calendar_id)
         self.google_timezone_var.set(config.google_timezone)
         self.secret_status_var.set(
-            "API hash збережений у Credential Manager"
+            "API hash збережено"
             if loaded.api_hash_saved
             else "API hash ще не збережений"
         )
@@ -572,6 +585,7 @@ class DesktopApplication:
                 client_secrets=self.google_credentials_var.get(),
                 calendar_id=self._selected_google_calendar_id(),
                 timezone_name=self.google_timezone_var.get(),
+                profile_id=self.profile_var.get(),
             )
         except Exception as error:
             self._show_error(error)
@@ -653,7 +667,7 @@ class DesktopApplication:
         try:
             date_from = date.fromisoformat(self.google_from_var.get().strip())
             date_to = date.fromisoformat(self.google_to_var.get().strip())
-        except ValueError as error:
+        except ValueError:
             self._show_error(
                 ValueError("Дати мають формат РРРР-ММ-ДД")
             )
@@ -772,7 +786,7 @@ class DesktopApplication:
     def _disconnect_google_calendar(self) -> None:
         if not messagebox.askyesno(
             APP_TITLE,
-            "Видалити збережений Google OAuth token з Credential Manager?",
+            "Видалити збережений Google OAuth token із системного keyring?",
         ):
             return
         GoogleOAuthManager(self.google_token_store).disconnect()
@@ -785,25 +799,34 @@ class DesktopApplication:
         self._log("Google Calendar відключено; OAuth token видалено.")
 
     def _save_settings(self, *, quiet: bool = False) -> bool:
+        api_hash_was_entered = bool(self.api_hash_var.get().strip())
         try:
             loaded = self.settings.save(
                 api_id_text=self.api_id_var.get(),
                 api_hash=self.api_hash_var.get(),
                 phone=self.phone_var.get(),
                 session=self.session_var.get(),
+                profile_id=self.profile_var.get(),
             )
         except Exception as error:
             self._show_error(error)
             return False
         self.api_hash_var.set("")
         self.secret_status_var.set(
-            "API hash збережений у Credential Manager"
+            "API hash збережено"
             if loaded.api_hash_saved
             else "API hash ще не збережений"
         )
         if not quiet:
             self._log("Налаштування збережено.")
-            messagebox.showinfo(APP_TITLE, "Налаштування збережено безпечно.")
+            messagebox.showinfo(
+                APP_TITLE,
+                (
+                    "API hash збережено"
+                    if api_hash_was_entered
+                    else "Налаштування збережено безпечно."
+                ),
+            )
         return True
 
     def _pick_videos(self) -> None:
@@ -1068,8 +1091,9 @@ class DesktopApplication:
         if not self._save_settings(quiet=True):
             return
         try:
-            config = self.settings.load().config
-            api_hash = self.settings.require_api_hash()
+            profile_id = self.profile_var.get()
+            config = self.settings.load(profile_id).config
+            api_hash = self.settings.require_api_hash(profile_id)
             factory, password_error = telethon_components()
             service = TelegramAuthService(
                 factory,
@@ -1079,7 +1103,11 @@ class DesktopApplication:
             self._show_error(error)
             return
         self._run_async(
-            service.request_code(config, api_hash),
+            service.request_code(
+                config,
+                api_hash,
+                profile_id=profile_id,
+            ),
             lambda phone_hash: self._ask_login_code(
                 service, config, api_hash, phone_hash
             ),
@@ -1107,6 +1135,7 @@ class DesktopApplication:
                 api_hash,
                 code=code,
                 phone_code_hash=phone_hash,
+                profile_id=self.profile_var.get(),
             ),
             lambda result: self._finish_login(service, config, api_hash, result),
             "Перевірка коду…",
@@ -1136,6 +1165,7 @@ class DesktopApplication:
                 config,
                 api_hash,
                 password=password,
+                profile_id=self.profile_var.get(),
             ),
             lambda _result: self._login_success(),
             "Перевірка 2FA…",
@@ -1147,8 +1177,8 @@ class DesktopApplication:
 
     def _runtime(self) -> tuple[UploadManifest, Any, str, TelegramDesktopService]:
         manifest = self._current_manifest()
-        config = self.settings.load().config
-        api_hash = self.settings.require_api_hash()
+        config = self.settings.load(manifest.profile_id).config
+        api_hash = self.settings.require_api_hash(manifest.profile_id)
         factory, _ = telethon_components()
         service = TelegramDesktopService(factory, self.database_path)
         return manifest, config, api_hash, service
@@ -1170,7 +1200,7 @@ class DesktopApplication:
             self.root.after(0, lambda: self.progress_var.set(percent))
 
         def status(text: str) -> None:
-            self.root.after(0, lambda value=text: self._log(value))
+            self.root.after(0, partial(self._log, text))
 
         async def calendar_revalidator(
             snapshots: Mapping[str, CalendarEventSnapshot],
@@ -1243,7 +1273,7 @@ class DesktopApplication:
             return
 
         def status(text: str) -> None:
-            self.root.after(0, lambda value=text: self._log(value))
+            self.root.after(0, partial(self._log, text))
 
         self._run_async(
             service.reconcile_manifest(
@@ -1268,7 +1298,7 @@ class DesktopApplication:
     def _run_async(
         self,
         coroutine: Coroutine[Any, Any, Any],
-        on_success,
+        on_success: Callable[[Any], object],
         busy_text: str,
     ) -> None:
         if self.busy:
@@ -1283,19 +1313,21 @@ class DesktopApplication:
             except Exception as error:
                 self.root.after(
                     0,
-                    lambda captured=error: self._background_error(captured),
+                    partial(self._background_error, error),
                 )
             else:
                 self.root.after(
                     0,
-                    lambda captured=result: self._background_success(
-                        on_success, captured
-                    ),
+                    partial(self._background_success, on_success, result),
                 )
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _background_success(self, callback, result: Any) -> None:
+    def _background_success(
+        self,
+        callback: Callable[[Any], object],
+        result: Any,
+    ) -> None:
         self._set_busy(False, "Готово")
         callback(result)
 
@@ -1316,8 +1348,11 @@ class DesktopApplication:
         self.status_var.set(text)
 
     def _show_error(self, error: Exception) -> None:
-        self._log(f"ПОМИЛКА: {error}")
-        messagebox.showerror(APP_TITLE, str(error))
+        secret = self.api_hash_var.get()
+        write_debug_exception(error, secrets=(secret,))
+        message = str(error).replace(secret, "[REDACTED]") if secret else str(error)
+        self._log(f"ПОМИЛКА: {message}")
+        messagebox.showerror(APP_TITLE, message)
 
     def _log(self, text: str) -> None:
         self.log.configure(state=tk.NORMAL)

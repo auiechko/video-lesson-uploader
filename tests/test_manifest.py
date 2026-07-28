@@ -3,21 +3,21 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
+from lesson_video_uploader.calendar_rules import CalendarEventSnapshot
 from lesson_video_uploader.manifest import (
     UploadManifest,
     load_manifest,
     render_manifest_preview,
     save_manifest,
 )
-from lesson_video_uploader.calendar_rules import CalendarEventSnapshot
 from lesson_video_uploader.models import (
     Lesson,
     LessonDetails,
     LessonSendMode,
 )
-from datetime import datetime
 
 
 class ManifestTests(unittest.TestCase):

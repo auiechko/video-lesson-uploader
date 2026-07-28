@@ -14,6 +14,7 @@ from .persistence import SQLiteSendItemRepository
 from .planning import plan_albums
 from .reconciliation import TelegramDeliveryReconciler
 from .sender import ManualReviewRequired, TelethonLessonSender
+from .telegram_runtime import create_telegram_client
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -53,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Показати ID чатів, доступних цьому акаунту",
     )
     chats.add_argument("--config", type=Path, default=Path("config.toml"))
+    chats.add_argument("--profile", default="main")
     chats.add_argument(
         "--limit",
         type=int,
@@ -66,10 +68,13 @@ def _load_optional_config(path: Path) -> AppConfig:
     return load_config(path) if path.is_file() else load_config()
 
 
-def _telegram_credentials(config: AppConfig) -> tuple[int, str]:
+def _telegram_credentials(
+    config: AppConfig,
+    profile_id: str,
+) -> tuple[int, str]:
     if config.api_id is None:
         raise ValueError("telegram.api_id is required in config.toml")
-    return config.api_id, resolve_api_hash(config.api_hash_env)
+    return config.api_id, resolve_api_hash(profile_id)
 
 
 def _telegram_client_class():
@@ -104,11 +109,17 @@ async def _send(
     config: AppConfig,
     database_path: Path,
 ) -> None:
-    api_id, api_hash = _telegram_credentials(config)
+    api_id, api_hash = _telegram_credentials(config, manifest.profile_id)
     TelegramClient = _telegram_client_class()
 
     repository = SQLiteSendItemRepository(database_path)
-    async with TelegramClient(config.session, api_id, api_hash) as client:
+    client = create_telegram_client(
+        TelegramClient,
+        profile_id=manifest.profile_id,
+        api_id=api_id,
+        api_hash=api_hash,
+    )
+    async with client:
         sender = TelethonLessonSender(
             client,
             repository,
@@ -151,10 +162,16 @@ def render_dialogs(dialogs: Sequence[object]) -> str:
     return "\n".join(lines)
 
 
-async def _chats(config: AppConfig, limit: int) -> None:
-    api_id, api_hash = _telegram_credentials(config)
+async def _chats(config: AppConfig, limit: int, profile_id: str) -> None:
+    api_id, api_hash = _telegram_credentials(config, profile_id)
     TelegramClient = _telegram_client_class()
-    async with TelegramClient(config.session, api_id, api_hash) as client:
+    client = create_telegram_client(
+        TelegramClient,
+        profile_id=profile_id,
+        api_id=api_id,
+        api_hash=api_hash,
+    )
+    async with client:
         dialogs = await client.get_dialogs(limit=limit)
     print(render_dialogs(list(dialogs)))
     print(
@@ -168,10 +185,16 @@ async def _reconcile(
     config: AppConfig,
     database_path: Path,
 ) -> None:
-    api_id, api_hash = _telegram_credentials(config)
+    api_id, api_hash = _telegram_credentials(config, manifest.profile_id)
     TelegramClient = _telegram_client_class()
     repository = SQLiteSendItemRepository(database_path)
-    async with TelegramClient(config.session, api_id, api_hash) as client:
+    client = create_telegram_client(
+        TelegramClient,
+        profile_id=manifest.profile_id,
+        api_id=api_id,
+        api_hash=api_hash,
+    )
+    async with client:
         reconciler = TelegramDeliveryReconciler(
             client,
             repository,
@@ -201,7 +224,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser.parse_args(argv)
         if args.command == "chats":
-            asyncio.run(_chats(_load_optional_config(args.config), args.limit))
+            asyncio.run(
+                _chats(
+                    _load_optional_config(args.config),
+                    args.limit,
+                    args.profile,
+                )
+            )
             return 0
         manifest = load_manifest(args.manifest)
         if args.command == "preview":

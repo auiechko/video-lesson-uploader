@@ -45,7 +45,7 @@ class TelegramAuthServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_code_returns_hash_and_always_disconnects(self) -> None:
         client = FakeClient()
         service = TelegramAuthService(
-            lambda *_: client,
+            lambda **_: client,
             password_required_error=PasswordNeeded,
         )
 
@@ -62,7 +62,7 @@ class TelegramAuthServiceTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient()
         client.sign_in.side_effect = PasswordNeeded()
         service = TelegramAuthService(
-            lambda *_: client,
+            lambda **_: client,
             password_required_error=PasswordNeeded,
         )
 
@@ -79,7 +79,7 @@ class TelegramAuthServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_verify_password_returns_authorized(self) -> None:
         client = FakeClient()
         service = TelegramAuthService(
-            lambda *_: client,
+            lambda **_: client,
             password_required_error=PasswordNeeded,
         )
 
@@ -121,7 +121,7 @@ class TelegramDesktopServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_requires_prior_gui_login(self) -> None:
         self.client.is_user_authorized.return_value = False
         service = TelegramDesktopService(
-            lambda *_: self.client,
+            lambda **_: self.client,
             Path(self.temp_dir.name) / "db.sqlite3",
         )
 
@@ -142,7 +142,7 @@ class TelegramDesktopServiceTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(id=102, grouped_id=777),
         ]
         service = TelegramDesktopService(
-            lambda *_: self.client,
+            lambda **_: self.client,
             Path(self.temp_dir.name) / "db.sqlite3",
         )
 
@@ -185,7 +185,7 @@ class TelegramDesktopServiceTests(unittest.IsolatedAsyncioTestCase):
         })
         revalidator = AsyncMock(side_effect=revalidation_error)
         database = Path(self.temp_dir.name) / "db.sqlite3"
-        service = TelegramDesktopService(lambda *_: self.client, database)
+        service = TelegramDesktopService(lambda **_: self.client, database)
 
         with self.assertRaises(BatchRevalidationRequired):
             await service.send_manifest(
@@ -230,7 +230,7 @@ class TelegramDesktopServiceTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(id=102, grouped_id=777),
         ]
         service = TelegramDesktopService(
-            lambda *_: self.client,
+            lambda **_: self.client,
             Path(self.temp_dir.name) / "db.sqlite3",
         )
 

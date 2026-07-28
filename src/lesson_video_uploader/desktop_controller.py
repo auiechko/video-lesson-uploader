@@ -10,6 +10,7 @@ from .credentials import CredentialStore, resolve_api_hash
 from .manifest import UploadManifest
 from .models import Lesson, LessonDetails, LessonSendMode
 from .planning import build_caption
+from .telegram_runtime import telegram_session_path
 
 if TYPE_CHECKING:
     from .calendar_rules import CalendarEventSnapshot
@@ -47,15 +48,29 @@ class DesktopSettingsController:
         self.config_path = config_path
         self.credential_store = credential_store
 
-    def load(self) -> LoadedDesktopSettings:
+    def load(self, profile_id: str = "main") -> LoadedDesktopSettings:
         config = (
             load_config(self.config_path)
             if self.config_path.is_file()
             else load_config()
         )
+        config = replace(
+            config,
+            session=str(telegram_session_path(profile_id)),
+        )
+        profile_getter = getattr(
+            self.credential_store,
+            "get_telegram_api_hash",
+            None,
+        )
+        secret = (
+            profile_getter(profile_id)
+            if callable(profile_getter)
+            else self.credential_store.get_secret()
+        )
         return LoadedDesktopSettings(
             config=config,
-            api_hash_saved=self.credential_store.get_secret() is not None,
+            api_hash_saved=bool(secret),
         )
 
     def save(
@@ -66,6 +81,7 @@ class DesktopSettingsController:
         phone: str,
         session: str,
         album_batch: str | None = None,
+        profile_id: str = "main",
     ) -> LoadedDesktopSettings:
         try:
             api_id = int(api_id_text.strip())
@@ -75,13 +91,10 @@ class DesktopSettingsController:
             raise ValueError("Telegram API ID має бути додатним числом")
         if not phone.strip():
             raise ValueError("Укажіть номер телефону Telegram")
-        if not session.strip():
-            raise ValueError("Укажіть шлях Telethon session")
-        current = self.load().config
+        current = self.load(profile_id).config
         config = AppConfig(
             api_id=api_id,
-            api_hash_env=current.api_hash_env,
-            session=session.strip(),
+            session=str(telegram_session_path(profile_id)),
             phone=phone.strip(),
             album_batch=album_batch or current.album_batch,
             google_client_secrets=current.google_client_secrets,
@@ -93,17 +106,32 @@ class DesktopSettingsController:
         )
         save_config(self.config_path, config)
         if api_hash.strip():
-            self.credential_store.set_secret(api_hash.strip())
+            profile_setter = getattr(
+                self.credential_store,
+                "set_telegram_api_hash",
+                None,
+            )
+            if callable(profile_setter):
+                profile_setter(profile_id, api_hash)
+            else:
+                self.credential_store.set_secret(api_hash.strip())
+        profile_getter = getattr(
+            self.credential_store,
+            "get_telegram_api_hash",
+            None,
+        )
+        secret = (
+            profile_getter(profile_id)
+            if callable(profile_getter)
+            else self.credential_store.get_secret()
+        )
         return LoadedDesktopSettings(
             config=config,
-            api_hash_saved=self.credential_store.get_secret() is not None,
+            api_hash_saved=bool(secret),
         )
 
-    def require_api_hash(self) -> str:
-        return resolve_api_hash(
-            self.load().config.api_hash_env,
-            self.credential_store,
-        )
+    def require_api_hash(self, profile_id: str = "main") -> str:
+        return resolve_api_hash(profile_id, self.credential_store)
 
     def save_google_calendar(
         self,
@@ -111,6 +139,7 @@ class DesktopSettingsController:
         client_secrets: str,
         calendar_id: str,
         timezone_name: str,
+        profile_id: str = "main",
     ) -> LoadedDesktopSettings:
         if not client_secrets.strip():
             raise ValueError("Виберіть Google OAuth credentials.json")
@@ -118,7 +147,7 @@ class DesktopSettingsController:
             raise ValueError("Укажіть Google Calendar ID")
         if not timezone_name.strip():
             raise ValueError("Укажіть часовий пояс календаря")
-        current = self.load()
+        current = self.load(profile_id)
         config = replace(
             current.config,
             google_client_secrets=client_secrets.strip(),
