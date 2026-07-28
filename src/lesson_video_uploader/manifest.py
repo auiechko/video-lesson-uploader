@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .models import Lesson
+from .models import Lesson, LessonDetails
 from .planning import build_caption, build_preview
 
 
@@ -51,6 +51,32 @@ def _video_paths(lesson: dict[str, Any], root: Path) -> tuple[Path, ...]:
         ordered.append((order, resolved.resolve()))
     ordered.sort(key=lambda value: (value[0], value[1].name))
     return tuple(path for _, path in ordered)
+
+
+_DETAIL_KEYS = ("student_id", "student_name", "lesson_label")
+
+
+def _lesson_details(
+    lesson: dict[str, Any],
+    *,
+    duration_hours: int,
+    is_trial: bool,
+    required: bool,
+) -> LessonDetails | None:
+    """Read the fields a caption is generated from.
+
+    They stay optional when the lesson carries a ready-made caption, which is
+    what a batch saved from the GUI looks like.
+    """
+    if not required and not any(key in lesson for key in _DETAIL_KEYS):
+        return None
+    return LessonDetails(
+        student_id=_required_string(lesson, "student_id"),
+        student_name=_required_string(lesson, "student_name"),
+        lesson_label=_required_string(lesson, "lesson_label"),
+        duration_hours=duration_hours,
+        is_trial=is_trial,
+    )
 
 
 def load_manifest(path: Path) -> UploadManifest:
@@ -97,14 +123,20 @@ def load_manifest(path: Path) -> UploadManifest:
             not isinstance(explicit_caption, str) or not explicit_caption.strip()
         ):
             raise ValueError("caption must be a non-empty string")
+        details = _lesson_details(
+            raw_lesson,
+            duration_hours=duration_hours,
+            is_trial=is_trial,
+            required=explicit_caption is None,
+        )
         caption = (
             explicit_caption.strip()
             if isinstance(explicit_caption, str)
             else build_caption(
                 date=event_start.date(),
-                student_id=_required_string(raw_lesson, "student_id"),
-                student_name=_required_string(raw_lesson, "student_name"),
-                lesson_label=_required_string(raw_lesson, "lesson_label"),
+                student_id=details.student_id,
+                student_name=details.student_name,
+                lesson_label=details.lesson_label,
                 duration_hours=duration_hours,
                 is_trial=is_trial,
             )
@@ -116,6 +148,7 @@ def load_manifest(path: Path) -> UploadManifest:
             event_start=event_start,
             caption=caption,
             ordered_video_paths=_video_paths(raw_lesson, path.parent),
+            details=details,
         ))
     lessons.sort(key=lambda lesson: (lesson.event_start, lesson.calendar_event_id))
     return UploadManifest(
@@ -137,12 +170,23 @@ def save_manifest(manifest: UploadManifest, path: Path) -> None:
             }
             for index, video_path in enumerate(lesson.ordered_video_paths, start=1)
         ]
-        lessons.append({
+        entry: dict[str, Any] = {
             "calendar_event_id": lesson.calendar_event_id,
             "event_start": lesson.event_start.isoformat(),
-            "caption": lesson.caption,
-            "videos": videos,
-        })
+        }
+        if lesson.details is not None:
+            entry.update({
+                "student_id": lesson.details.student_id,
+                "student_name": lesson.details.student_name,
+                "lesson_label": lesson.details.lesson_label,
+                "duration_hours": lesson.details.duration_hours,
+                "is_trial": lesson.details.is_trial,
+            })
+        # Written even when the fields above could rebuild it, so the exact
+        # text that goes to Telegram survives any later caption change.
+        entry["caption"] = lesson.caption
+        entry["videos"] = videos
+        lessons.append(entry)
     payload = {
         "profile_id": manifest.profile_id,
         "batch_id": manifest.batch_id,

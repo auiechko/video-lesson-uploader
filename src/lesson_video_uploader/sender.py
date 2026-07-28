@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from .models import AlbumDelivery, Lesson, SendStatus
 from .persistence import SQLiteSendItemRepository
 from .planning import DEFAULT_ALBUM_BATCH_TEMPLATE, plan_albums
+from .progress import LessonUploadProgress
 
 
 class ManualReviewRequired(RuntimeError):
@@ -20,6 +21,31 @@ class TelethonClient(Protocol):
 
 ProgressCallback = Callable[[int, int], object]
 AlbumSplitWarning = Callable[[str, int], object]
+
+
+def _lesson_progress(
+    lesson: Lesson,
+    callback: ProgressCallback | None,
+) -> ProgressCallback | None:
+    """Rebase Telethon's per-file reports onto the whole lesson.
+
+    Falls back to the raw callback when the sizes cannot be read, so a lesson
+    still uploads if a file turns unreadable between validation and send.
+    """
+    if callback is None:
+        return None
+    try:
+        sizes = tuple(path.stat().st_size for path in lesson.ordered_video_paths)
+    except OSError:
+        return callback
+    if any(size <= 0 for size in sizes):
+        return callback
+    tracker = LessonUploadProgress(sizes)
+
+    def report(current: int, total: int) -> None:
+        callback(*tracker.observe(current, total))
+
+    return report
 
 
 class TelethonLessonSender:
@@ -66,6 +92,7 @@ class TelethonLessonSender:
         )
         if len(plans) > 1 and album_split_warning is not None:
             album_split_warning(lesson.caption, len(plans))
+        report_progress = _lesson_progress(lesson, progress_callback)
 
         uploading = replace(lesson, status=SendStatus.UPLOADING)
         self.repository.save(uploading)
@@ -84,7 +111,7 @@ class TelethonLessonSender:
                     file=file_argument,
                     caption=plan.caption,
                     supports_streaming=True,
-                    progress_callback=progress_callback,
+                    progress_callback=report_progress,
                 )
                 messages = (
                     list(response)

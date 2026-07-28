@@ -7,7 +7,7 @@ from pathlib import Path
 from .config import AppConfig, load_config, save_config
 from .credentials import CredentialStore, resolve_api_hash
 from .manifest import UploadManifest
-from .models import Lesson
+from .models import Lesson, LessonDetails
 from .planning import build_caption
 
 
@@ -142,6 +142,13 @@ def create_lesson_from_form(
             is_trial=form.is_trial,
         ),
         ordered_video_paths=form.video_paths,
+        details=LessonDetails(
+            student_id=form.student_id.strip(),
+            student_name=form.student_name.strip(),
+            lesson_label=form.lesson_label.strip(),
+            duration_hours=form.duration_hours,
+            is_trial=form.is_trial,
+        ),
     )
 
 

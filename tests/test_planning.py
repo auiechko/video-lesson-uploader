@@ -4,11 +4,10 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from lesson_video_uploader.models import Lesson, LessonVideo
+from lesson_video_uploader.models import Lesson, LessonDetails
 from lesson_video_uploader.planning import (
     build_caption,
     build_preview,
-    group_videos_by_lesson,
     plan_albums,
 )
 
@@ -103,31 +102,33 @@ class AlbumPlanningTests(unittest.TestCase):
             make_lesson(0)
 
 
-class GroupingAndPreviewTests(unittest.TestCase):
-    def test_segments_from_different_calendar_events_are_separate_lessons(self) -> None:
-        videos = [
-            LessonVideo("event-b", EVENT_START, Path("b-2.mp4"), order=2),
-            LessonVideo("event-a", EVENT_START, Path("a-1.mp4"), order=1),
-            LessonVideo("event-b", EVENT_START, Path("b-1.mp4"), order=1),
-        ]
-        lessons = group_videos_by_lesson(
-            videos,
-            profile_id="profile-1",
-            batch_id="batch-1",
-            captions={"event-a": "Святослав", "event-b": "Ільяс"},
-        )
-        self.assertEqual(len(lessons), 2)
-        by_event = {lesson.calendar_event_id: lesson for lesson in lessons}
-        self.assertEqual(by_event["event-a"].ordered_video_paths, (Path("a-1.mp4"),))
-        self.assertEqual(
-            by_event["event-b"].ordered_video_paths,
-            (Path("b-1.mp4"), Path("b-2.mp4")),
-        )
-
+class PreviewTests(unittest.TestCase):
     def test_preview_has_one_expandable_row_per_lesson(self) -> None:
         row = build_preview(make_lesson(3))
         self.assertEqual(row.summary, "12.06.2026 | Ільяс | 3 відео | Один Telegram-альбом")
         self.assertEqual(len(row.video_paths), 3)
+
+    def test_two_word_student_name_is_not_cut_in_half(self) -> None:
+        lesson = Lesson(
+            profile_id="profile-1",
+            batch_id="batch-1",
+            calendar_event_id="event-1",
+            event_start=EVENT_START,
+            caption="12.06.2026 105813989 Іван Петров 10р індив",
+            ordered_video_paths=(Path("one.mp4"),),
+            details=LessonDetails(
+                student_id="105813989",
+                student_name="Іван Петров",
+                lesson_label="10р індив",
+            ),
+        )
+
+        row = build_preview(lesson)
+
+        self.assertEqual(
+            row.summary,
+            "12.06.2026 | Іван Петров | 1 відео | Один Telegram-альбом",
+        )
 
 
 if __name__ == "__main__":

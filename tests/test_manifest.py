@@ -11,7 +11,7 @@ from lesson_video_uploader.manifest import (
     render_manifest_preview,
     save_manifest,
 )
-from lesson_video_uploader.models import Lesson
+from lesson_video_uploader.models import Lesson, LessonDetails
 from datetime import datetime
 
 
@@ -135,6 +135,58 @@ class ManifestTests(unittest.TestCase):
             tuple(path.name for path in loaded.lessons[0].ordered_video_paths),
             ("one.mp4", "two.mp4"),
         )
+
+    def test_saved_batch_can_be_reopened_in_the_lesson_editor(self) -> None:
+        details = LessonDetails(
+            student_id="105813989",
+            student_name="Іван Петров",
+            lesson_label="10р індив",
+            duration_hours=2,
+            is_trial=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "one.mp4"
+            video.touch()
+            manifest = UploadManifest(
+                profile_id="main",
+                batch_id="batch-1",
+                target_peer="me",
+                lessons=(Lesson(
+                    profile_id="main",
+                    batch_id="batch-1",
+                    calendar_event_id="event-1",
+                    event_start=datetime(2026, 6, 12, 10),
+                    caption="12.06.2026 105813989 Іван Петров 10р індив ДВІ ГОДИНИ (пробне)",
+                    ordered_video_paths=(video,),
+                    details=details,
+                ),),
+            )
+            output = root / "saved-batch.json"
+
+            save_manifest(manifest, output)
+            loaded = load_manifest(output)
+
+        self.assertEqual(loaded.lessons[0].details, details)
+
+    def test_lesson_without_a_caption_still_requires_the_student_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "one.mp4").touch()
+            path = root / "batch.json"
+            path.write_text(json.dumps({
+                "profile_id": "p",
+                "batch_id": "b",
+                "target_peer": "group",
+                "lessons": [{
+                    "calendar_event_id": "e",
+                    "event_start": "2026-06-12T10:00:00",
+                    "videos": ["one.mp4"],
+                }],
+            }), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "student_id"):
+                load_manifest(path)
 
 
 if __name__ == "__main__":

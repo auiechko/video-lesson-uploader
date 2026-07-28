@@ -1,42 +1,43 @@
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
 
-from lesson_video_uploader.progress import AlbumProgress
+from lesson_video_uploader.progress import LessonUploadProgress
 
 
-class AlbumProgressTests(unittest.TestCase):
-    def test_aggregates_current_file_and_total_album_progress(self) -> None:
-        progress = AlbumProgress(
-            student_name="Ільяс",
-            video_paths=(Path("one.mp4"), Path("two.mp4"), Path("three.mp4")),
-            video_sizes=(100, 200, 300),
-        )
+class LessonUploadProgressTests(unittest.TestCase):
+    def test_position_covers_every_video_not_only_the_current_one(self) -> None:
+        progress = LessonUploadProgress((100, 200, 300))
 
-        progress.start_file(1)
-        snapshot = progress.update(100, 200)
+        self.assertEqual(progress.observe(50, 100), (50, 600))
+        self.assertEqual(progress.observe(100, 100), (100, 600))
+        self.assertEqual(progress.observe(100, 200), (200, 600))
+        self.assertEqual(progress.observe(200, 200), (300, 600))
+        self.assertEqual(progress.observe(300, 300), (600, 600))
 
-        self.assertEqual(snapshot.video_number, 2)
-        self.assertEqual(snapshot.video_count, 3)
-        self.assertEqual(snapshot.file_percent, 50)
-        self.assertEqual(snapshot.total_percent, 33)
+    def test_videos_of_equal_size_are_not_mistaken_for_one_another(self) -> None:
+        progress = LessonUploadProgress((100, 100))
 
-    def test_completed_message_reports_one_album(self) -> None:
-        progress = AlbumProgress(
-            student_name="Ільяс",
-            video_paths=(Path("one.mp4"), Path("two.mp4")),
-            video_sizes=(100, 100),
-        )
-        self.assertEqual(progress.completion_message(), "Надіслано 2 відео одним альбомом.")
+        self.assertEqual(progress.observe(100, 100), (100, 200))
+        self.assertEqual(progress.observe(100, 100), (200, 200))
 
-    def test_mismatched_sizes_are_rejected(self) -> None:
+    def test_progress_is_capped_at_the_lesson_total(self) -> None:
+        progress = LessonUploadProgress((100,))
+
+        progress.observe(100, 100)
+
+        self.assertEqual(progress.observe(100, 100), (100, 100))
+
+    def test_impossible_sizes_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "size"):
-            AlbumProgress(
-                student_name="Ільяс",
-                video_paths=(Path("one.mp4"),),
-                video_sizes=(),
-            )
+            LessonUploadProgress((100, 0))
+        with self.assertRaisesRegex(ValueError, "video"):
+            LessonUploadProgress(())
+
+    def test_a_zero_byte_report_cannot_divide_the_caller_by_zero(self) -> None:
+        progress = LessonUploadProgress((100,))
+        with self.assertRaisesRegex(ValueError, "total"):
+            progress.observe(0, 0)
 
 
 if __name__ == "__main__":

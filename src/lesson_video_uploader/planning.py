@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Iterable, Mapping
 
-from .models import Lesson, LessonVideo
+from .models import Lesson
 
 
 TELEGRAM_ALBUM_LIMIT = 10
@@ -77,41 +75,22 @@ def plan_albums(
     )
 
 
-def group_videos_by_lesson(
-    videos: Iterable[LessonVideo],
-    *,
-    profile_id: str,
-    batch_id: str,
-    captions: Mapping[str, str],
-) -> tuple[Lesson, ...]:
-    grouped: dict[str, list[LessonVideo]] = defaultdict(list)
-    for video in videos:
-        grouped[video.calendar_event_id].append(video)
+def _preview_name(lesson: Lesson) -> str:
+    """Name the lesson for one preview row.
 
-    lessons: list[Lesson] = []
-    for event_id, event_videos in grouped.items():
-        try:
-            caption = captions[event_id]
-        except KeyError as error:
-            raise ValueError(f"missing caption for calendar event {event_id!r}") from error
-        starts = {video.event_start for video in event_videos}
-        if len(starts) != 1:
-            raise ValueError(f"calendar event {event_id!r} has inconsistent start times")
-        ordered = sorted(event_videos, key=lambda video: (video.order, video.path.name))
-        lessons.append(Lesson(
-            profile_id=profile_id,
-            batch_id=batch_id,
-            calendar_event_id=event_id,
-            event_start=ordered[0].event_start,
-            caption=caption,
-            ordered_video_paths=tuple(video.path for video in ordered),
-        ))
-    return tuple(sorted(lessons, key=lambda item: (item.event_start, item.calendar_event_id)))
+    Prefers the recorded student name, because reading it back out of the
+    caption only works for single-word names and not at all for a caption the
+    user wrote themselves. The split stays as a fallback for lessons built by
+    hand, without details attached.
+    """
+    if lesson.details is not None:
+        return lesson.details.student_name
+    caption_parts = lesson.caption.split()
+    return caption_parts[2] if len(caption_parts) >= 3 else lesson.caption
 
 
 def build_preview(lesson: Lesson) -> PreviewRow:
-    caption_parts = lesson.caption.split()
-    student_name = caption_parts[2] if len(caption_parts) >= 3 else lesson.caption
+    student_name = _preview_name(lesson)
     album_count = (lesson.video_count + TELEGRAM_ALBUM_LIMIT - 1) // TELEGRAM_ALBUM_LIMIT
     album_label = (
         "Один Telegram-альбом"
