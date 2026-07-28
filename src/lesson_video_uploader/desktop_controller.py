@@ -75,6 +75,9 @@ class DesktopSettingsController:
             session=session.strip(),
             phone=phone.strip(),
             album_batch=album_batch or current.album_batch,
+            google_client_secrets=current.google_client_secrets,
+            google_calendar_id=current.google_calendar_id,
+            google_timezone=current.google_timezone,
         )
         save_config(self.config_path, config)
         if api_hash.strip():
@@ -88,6 +91,32 @@ class DesktopSettingsController:
         return resolve_api_hash(
             self.load().config.api_hash_env,
             self.credential_store,
+        )
+
+    def save_google_calendar(
+        self,
+        *,
+        client_secrets: str,
+        calendar_id: str,
+        timezone_name: str,
+    ) -> LoadedDesktopSettings:
+        if not client_secrets.strip():
+            raise ValueError("Виберіть Google OAuth credentials.json")
+        if not calendar_id.strip():
+            raise ValueError("Укажіть Google Calendar ID")
+        if not timezone_name.strip():
+            raise ValueError("Укажіть часовий пояс календаря")
+        current = self.load()
+        config = replace(
+            current.config,
+            google_client_secrets=client_secrets.strip(),
+            google_calendar_id=calendar_id.strip(),
+            google_timezone=timezone_name.strip(),
+        )
+        save_config(self.config_path, config)
+        return LoadedDesktopSettings(
+            config=config,
+            api_hash_saved=current.api_hash_saved,
         )
 
 

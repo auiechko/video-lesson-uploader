@@ -9,6 +9,13 @@ class DesktopImportTests(unittest.TestCase):
 
         self.assertTrue(callable(main))
         self.assertTrue(callable(DesktopApplication))
+        for method_name in (
+            "_connect_google_calendar",
+            "_load_google_events",
+            "_import_google_event",
+            "_disconnect_google_calendar",
+        ):
+            self.assertTrue(callable(getattr(DesktopApplication, method_name)))
 
 
 if __name__ == "__main__":

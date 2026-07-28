@@ -97,6 +97,32 @@ class DesktopSettingsControllerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "API hash"):
                     controller.require_api_hash()
 
+    def test_google_calendar_settings_preserve_telegram_configuration(self) -> None:
+        credentials = FakeCredentialStore()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            controller = DesktopSettingsController(config_path, credentials)
+            controller.save(
+                api_id_text="123456",
+                api_hash="telegram-secret",
+                phone="+380991234567",
+                session="telegram-session",
+            )
+
+            result = controller.save_google_calendar(
+                client_secrets="C:/google/credentials.json",
+                calendar_id="primary",
+                timezone_name="Europe/Kyiv",
+            )
+
+        self.assertEqual(result.config.api_id, 123456)
+        self.assertEqual(result.config.session, "telegram-session")
+        self.assertEqual(
+            result.config.google_client_secrets,
+            "C:/google/credentials.json",
+        )
+        self.assertEqual(credentials.value, "telegram-secret")
+
     def test_environment_variable_is_accepted_instead_of_the_vault(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             controller = DesktopSettingsController(

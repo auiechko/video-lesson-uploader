@@ -9,6 +9,10 @@ venv/
 *.session
 *.session-journal
 config.toml
+credentials.json
+client_secret*.json
+google-credentials*.json
+token.json
 .env
 batch*.json
 !manifest.example.json

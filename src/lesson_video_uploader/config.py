@@ -16,6 +16,9 @@ class AppConfig:
     api_hash_env: str = "TELEGRAM_API_HASH"
     session: str = "lesson-video-uploader"
     phone: str = ""
+    google_client_secrets: str = ""
+    google_calendar_id: str = "primary"
+    google_timezone: str = "Europe/Kyiv"
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -49,18 +52,38 @@ def load_config(path: Path | None = None) -> AppConfig:
     api_hash_env = telegram.get("api_hash_env", "TELEGRAM_API_HASH")
     session = telegram.get("session", "lesson-video-uploader")
     phone = telegram.get("phone", "")
+    google_calendar = raw.get("google_calendar", {})
     if not isinstance(api_hash_env, str) or not api_hash_env.strip():
         raise ValueError("telegram.api_hash_env must be a non-empty string")
     if not isinstance(session, str) or not session.strip():
         raise ValueError("telegram.session must be a non-empty string")
     if not isinstance(phone, str):
         raise ValueError("telegram.phone must be a string")
+    if not isinstance(google_calendar, dict):
+        raise ValueError("[google_calendar] must be a TOML table")
+    google_client_secrets = google_calendar.get("client_secrets", "")
+    google_calendar_id = google_calendar.get("calendar_id", "primary")
+    google_timezone = google_calendar.get("timezone", "Europe/Kyiv")
+    for name, value in (
+        ("google_calendar.client_secrets", google_client_secrets),
+        ("google_calendar.calendar_id", google_calendar_id),
+        ("google_calendar.timezone", google_timezone),
+    ):
+        if not isinstance(value, str):
+            raise ValueError(f"{name} must be a string")
+    if not google_calendar_id.strip():
+        raise ValueError("google_calendar.calendar_id must be non-empty")
+    if not google_timezone.strip():
+        raise ValueError("google_calendar.timezone must be non-empty")
     return AppConfig(
         album_batch=template,
         api_id=api_id,
         api_hash_env=api_hash_env.strip(),
         session=session.strip(),
         phone=phone.strip(),
+        google_client_secrets=google_client_secrets.strip(),
+        google_calendar_id=google_calendar_id.strip(),
+        google_timezone=google_timezone.strip(),
     )
 
 
@@ -74,6 +97,14 @@ def save_config(path: Path, config: AppConfig) -> None:
         f"api_hash_env = {json.dumps(config.api_hash_env, ensure_ascii=False)}",
         f"session = {json.dumps(config.session, ensure_ascii=False)}",
         f"phone = {json.dumps(config.phone, ensure_ascii=False)}",
+        "",
+        "[google_calendar]",
+        (
+            "client_secrets = "
+            f"{json.dumps(config.google_client_secrets, ensure_ascii=False)}"
+        ),
+        f"calendar_id = {json.dumps(config.google_calendar_id, ensure_ascii=False)}",
+        f"timezone = {json.dumps(config.google_timezone, ensure_ascii=False)}",
         "",
         "[caption]",
         f"album_batch = {json.dumps(config.album_batch, ensure_ascii=False)}",

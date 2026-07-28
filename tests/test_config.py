@@ -70,6 +70,26 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(loaded.api_id, 123456)
         self.assertEqual(loaded.phone, "+380991234567")
 
+    def test_google_calendar_settings_round_trip_without_oauth_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            save_config(path, AppConfig(
+                google_client_secrets="C:/secrets/google-credentials.json",
+                google_calendar_id="lessons@example.com",
+                google_timezone="Europe/Kyiv",
+            ))
+
+            text = path.read_text(encoding="utf-8")
+            loaded = load_config(path)
+
+        self.assertEqual(
+            loaded.google_client_secrets,
+            "C:/secrets/google-credentials.json",
+        )
+        self.assertEqual(loaded.google_calendar_id, "lessons@example.com")
+        self.assertEqual(loaded.google_timezone, "Europe/Kyiv")
+        self.assertNotIn("refresh_token", text)
+
 
 if __name__ == "__main__":
     unittest.main()
