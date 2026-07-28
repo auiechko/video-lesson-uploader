@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from lesson_video_uploader.calendar_rules import (
+    BatchRevalidationRequired,
+    CalendarEventSnapshot,
+)
 from lesson_video_uploader.config import AppConfig
 from lesson_video_uploader.manifest import UploadManifest
 from lesson_video_uploader.models import Lesson, SendStatus
+from lesson_video_uploader.persistence import SQLiteSendItemRepository
 from lesson_video_uploader.telegram_desktop import (
     LoginResult,
     TelegramAuthService,
@@ -153,6 +159,91 @@ class TelegramDesktopServiceTests(unittest.IsolatedAsyncioTestCase):
             -100999,
         )
         self.client.disconnect.assert_awaited_once()
+
+    async def test_calendar_change_blocks_batch_before_telegram_upload(self) -> None:
+        snapshot = CalendarEventSnapshot(
+            event_id="event",
+            summary="105813989 Сервер Османов (Ільяс 10) Учко ТГ",
+            student_id="105813989",
+            student_name="Ільяс",
+            student_age=10,
+            local_date="2026-06-12",
+            start="2026-06-12T10:00:00+03:00",
+            end="2026-06-12T11:00:00+03:00",
+            duration_minutes=60,
+            status="NORMAL",
+            is_trial=False,
+            is_no_recording=False,
+            is_transferred=False,
+            is_cancelled=False,
+            is_pause=False,
+        )
+        lesson = replace(self.lesson, calendar_snapshot=snapshot)
+        manifest = UploadManifest("main", "batch", "me", (lesson,))
+        revalidation_error = BatchRevalidationRequired({
+            "event": {"status": ("NORMAL", "IGNORED_CANCELLED")}
+        })
+        revalidator = AsyncMock(side_effect=revalidation_error)
+        database = Path(self.temp_dir.name) / "db.sqlite3"
+        service = TelegramDesktopService(lambda *_: self.client, database)
+
+        with self.assertRaises(BatchRevalidationRequired):
+            await service.send_manifest(
+                manifest,
+                self.config,
+                "api-hash",
+                target_peer="me",
+                calendar_revalidator=revalidator,
+            )
+
+        self.client.connect.assert_not_awaited()
+        self.client.send_file.assert_not_awaited()
+        saved = SQLiteSendItemRepository(database).get(lesson.identity)
+        self.assertEqual(
+            saved.status,
+            SendStatus.BATCH_REVALIDATION_REQUIRED,
+        )
+
+    async def test_unchanged_calendar_is_revalidated_before_upload(self) -> None:
+        snapshot = CalendarEventSnapshot(
+            event_id="event",
+            summary="105813989 Сервер Османов (Ільяс 10) Учко ТГ",
+            student_id="105813989",
+            student_name="Ільяс",
+            student_age=10,
+            local_date="2026-06-12",
+            start="2026-06-12T10:00:00+03:00",
+            end="2026-06-12T11:00:00+03:00",
+            duration_minutes=60,
+            status="NORMAL",
+            is_trial=False,
+            is_no_recording=False,
+            is_transferred=False,
+            is_cancelled=False,
+            is_pause=False,
+        )
+        lesson = replace(self.lesson, calendar_snapshot=snapshot)
+        manifest = UploadManifest("main", "batch", "me", (lesson,))
+        revalidator = AsyncMock(return_value=None)
+        self.client.send_file.return_value = [
+            SimpleNamespace(id=101, grouped_id=777),
+            SimpleNamespace(id=102, grouped_id=777),
+        ]
+        service = TelegramDesktopService(
+            lambda *_: self.client,
+            Path(self.temp_dir.name) / "db.sqlite3",
+        )
+
+        await service.send_manifest(
+            manifest,
+            self.config,
+            "api-hash",
+            target_peer="me",
+            calendar_revalidator=revalidator,
+        )
+
+        revalidator.assert_awaited_once_with({"event": snapshot})
+        self.client.send_file.assert_awaited_once()
 
 
 if __name__ == "__main__":

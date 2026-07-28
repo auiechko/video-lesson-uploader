@@ -11,6 +11,7 @@ phone = "+380991234567"
 client_secrets = ""
 calendar_id = "primary"
 timezone = "Europe/Kyiv"
+calendar_conflict_tolerance_minutes = 10
 
 [caption]
 # Використовується лише коли один урок має понад 10 MP4.

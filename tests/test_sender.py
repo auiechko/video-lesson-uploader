@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from lesson_video_uploader.models import Lesson, SendStatus
+from lesson_video_uploader.models import Lesson, LessonSendMode, SendStatus
 from lesson_video_uploader.persistence import SQLiteSendItemRepository
 from lesson_video_uploader.sender import ManualReviewRequired, TelethonLessonSender
 
@@ -59,6 +59,34 @@ class SenderTests(unittest.IsolatedAsyncioTestCase):
         await sender.send(lesson(1), target_peer="group")
 
         self.assertEqual(self.client.send_file.await_args.kwargs["file"], "video-0.mp4")
+
+    async def test_no_recording_lesson_sends_one_text_message_without_file(self) -> None:
+        self.client.send_message = AsyncMock(
+            return_value=SimpleNamespace(id=501)
+        )
+        item = Lesson(
+            profile_id="profile-1",
+            batch_id="batch-1",
+            calendar_event_id="event-text",
+            event_start=datetime(2026, 6, 12, 10),
+            caption=(
+                "12.06.2026 105813989 Ільяс 10р індив "
+                "(пробне) (без запису)"
+            ),
+            ordered_video_paths=(),
+            send_mode=LessonSendMode.TEXT_ONLY,
+        )
+        sender = TelethonLessonSender(self.client, self.repository)
+
+        result = await sender.send(item, target_peer="group")
+
+        self.client.send_file.assert_not_awaited()
+        self.client.send_message.assert_awaited_once_with(
+            entity="group",
+            message=item.caption,
+        )
+        self.assertEqual(result.status, SendStatus.SENT)
+        self.assertEqual(result.telegram_message_ids, (501,))
 
     async def test_eleven_videos_use_two_calls_and_collect_every_message_id(self) -> None:
         self.client.send_file.side_effect = [

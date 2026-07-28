@@ -16,6 +16,7 @@ class ConfigTests(unittest.TestCase):
     def test_default_config_has_album_batch_and_no_part_template(self) -> None:
         config = load_config()
         self.assertEqual(config.album_batch, DEFAULT_ALBUM_BATCH_TEMPLATE)
+        self.assertEqual(config.calendar_conflict_tolerance_minutes, 10)
         self.assertFalse(hasattr(config, "part"))
 
     def test_custom_album_batch_template_is_loaded(self) -> None:
@@ -77,6 +78,7 @@ class ConfigTests(unittest.TestCase):
                 google_client_secrets="C:/secrets/google-credentials.json",
                 google_calendar_id="lessons@example.com",
                 google_timezone="Europe/Kyiv",
+                calendar_conflict_tolerance_minutes=15,
             ))
 
             text = path.read_text(encoding="utf-8")
@@ -88,7 +90,20 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(loaded.google_calendar_id, "lessons@example.com")
         self.assertEqual(loaded.google_timezone, "Europe/Kyiv")
+        self.assertEqual(loaded.calendar_conflict_tolerance_minutes, 15)
         self.assertNotIn("refresh_token", text)
+
+    def test_negative_calendar_conflict_tolerance_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                "[google_calendar]\n"
+                "calendar_conflict_tolerance_minutes = -1\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "tolerance"):
+                load_config(path)
 
 
 if __name__ == "__main__":

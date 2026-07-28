@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .models import Lesson, LessonDetails
+from .calendar_rules import CalendarEventSnapshot
+from .models import Lesson, LessonDetails, LessonSendMode
 from .planning import build_caption, build_preview
 
 
@@ -26,9 +27,18 @@ def _required_string(mapping: dict[str, Any], name: str) -> str:
     return value.strip()
 
 
-def _video_paths(lesson: dict[str, Any], root: Path) -> tuple[Path, ...]:
+def _video_paths(
+    lesson: dict[str, Any],
+    root: Path,
+    *,
+    allow_empty: bool = False,
+) -> tuple[Path, ...]:
     raw_videos = lesson.get("videos")
-    if not isinstance(raw_videos, list) or not raw_videos:
+    if not isinstance(raw_videos, list):
+        raise ValueError("videos must be a list")
+    if not raw_videos:
+        if allow_empty:
+            return ()
         raise ValueError("each lesson must have at least one video")
     ordered: list[tuple[int, Path]] = []
     for default_order, item in enumerate(raw_videos, start=1):
@@ -75,12 +85,30 @@ def _lesson_details(
     """
     if not required and not any(key in lesson for key in _DETAIL_KEYS):
         return None
+    student_age = lesson.get("student_age")
+    if student_age is not None and (
+        not isinstance(student_age, int) or isinstance(student_age, bool)
+    ):
+        raise ValueError("student_age must be an integer or null")
+    calendar_status = lesson.get("calendar_status", "NORMAL")
+    if not isinstance(calendar_status, str) or not calendar_status.strip():
+        raise ValueError("calendar_status must be a non-empty string")
+    is_no_recording = lesson.get("is_no_recording", False)
+    is_transferred = lesson.get("is_transferred", False)
+    if not isinstance(is_no_recording, bool):
+        raise ValueError("is_no_recording must be true or false")
+    if not isinstance(is_transferred, bool):
+        raise ValueError("is_transferred must be true or false")
     return LessonDetails(
         student_id=_required_string(lesson, "student_id"),
         student_name=_required_string(lesson, "student_name"),
         lesson_label=_required_string(lesson, "lesson_label"),
         duration_hours=duration_hours,
         is_trial=is_trial,
+        student_age=student_age,
+        calendar_status=calendar_status.strip(),
+        is_no_recording=is_no_recording,
+        is_transferred=is_transferred,
     )
 
 
@@ -123,6 +151,23 @@ def load_manifest(path: Path) -> UploadManifest:
         is_trial = raw_lesson.get("is_trial", False)
         if not isinstance(is_trial, bool):
             raise ValueError("is_trial must be true or false")
+        try:
+            send_mode = LessonSendMode(
+                raw_lesson.get("send_mode", LessonSendMode.MEDIA.value)
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError("send_mode must be MEDIA or TEXT_ONLY") from error
+        raw_snapshot = raw_lesson.get("calendar_snapshot")
+        if raw_snapshot is not None and not isinstance(raw_snapshot, dict):
+            raise ValueError("calendar_snapshot must be an object")
+        try:
+            calendar_snapshot = (
+                CalendarEventSnapshot(**raw_snapshot)
+                if raw_snapshot is not None
+                else None
+            )
+        except TypeError as error:
+            raise ValueError("invalid calendar_snapshot") from error
         explicit_caption = raw_lesson.get("caption")
         if explicit_caption is not None and (
             not isinstance(explicit_caption, str) or not explicit_caption.strip()
@@ -152,8 +197,14 @@ def load_manifest(path: Path) -> UploadManifest:
             calendar_event_id=event_id,
             event_start=event_start,
             caption=caption,
-            ordered_video_paths=_video_paths(raw_lesson, path.parent),
+            ordered_video_paths=_video_paths(
+                raw_lesson,
+                path.parent,
+                allow_empty=send_mode is LessonSendMode.TEXT_ONLY,
+            ),
+            send_mode=send_mode,
             details=details,
+            calendar_snapshot=calendar_snapshot,
         ))
     lessons.sort(key=lambda lesson: (lesson.event_start, lesson.calendar_event_id))
     return UploadManifest(
@@ -186,10 +237,17 @@ def save_manifest(manifest: UploadManifest, path: Path) -> None:
                 "lesson_label": lesson.details.lesson_label,
                 "duration_hours": lesson.details.duration_hours,
                 "is_trial": lesson.details.is_trial,
+                "student_age": lesson.details.student_age,
+                "calendar_status": lesson.details.calendar_status,
+                "is_no_recording": lesson.details.is_no_recording,
+                "is_transferred": lesson.details.is_transferred,
             })
         # Written even when the fields above could rebuild it, so the exact
         # text that goes to Telegram survives any later caption change.
         entry["caption"] = lesson.caption
+        entry["send_mode"] = lesson.send_mode.value
+        if lesson.calendar_snapshot is not None:
+            entry["calendar_snapshot"] = asdict(lesson.calendar_snapshot)
         entry["videos"] = videos
         lessons.append(entry)
     payload = {

@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from lesson_video_uploader.models import Lesson, LessonDetails
+from lesson_video_uploader.models import Lesson, LessonDetails, LessonSendMode
 from lesson_video_uploader.planning import (
     build_caption,
     build_preview,
@@ -103,6 +103,23 @@ class AlbumPlanningTests(unittest.TestCase):
 
 
 class PreviewTests(unittest.TestCase):
+    def test_text_only_lesson_preview_does_not_claim_it_has_an_album(self) -> None:
+        lesson = Lesson(
+            profile_id="main",
+            batch_id="batch",
+            calendar_event_id="event-text",
+            event_start=datetime(2026, 6, 12, 10),
+            caption="12.06.2026 1 Ільяс 10р індив (без запису)",
+            ordered_video_paths=(),
+            send_mode=LessonSendMode.TEXT_ONLY,
+            details=LessonDetails("1", "Ільяс", "10р індив"),
+        )
+
+        row = build_preview(lesson)
+
+        self.assertIn("текстове повідомлення", row.summary)
+        self.assertNotIn("альбом", row.summary.casefold())
+
     def test_preview_has_one_expandable_row_per_lesson(self) -> None:
         row = build_preview(make_lesson(3))
         self.assertEqual(row.summary, "12.06.2026 | Ільяс | 3 відео | Один Telegram-альбом")

@@ -7,12 +7,16 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from lesson_video_uploader.calendar_rules import CalendarEventStatus
+from lesson_video_uploader.desktop_controller import create_lesson_from_form
 from lesson_video_uploader.google_calendar import (
     CALENDAR_READONLY_SCOPE,
+    CalendarEventNotSendable,
     GoogleCalendarService,
     GoogleOAuthManager,
     calendar_event_to_lesson_form,
 )
+from lesson_video_uploader.models import LessonSendMode
 
 
 class FakeCredentialStore:
@@ -166,19 +170,39 @@ class FakeExecutable:
 
 
 class FakeResource:
-    def __init__(self, pages: list[dict]) -> None:
+    def __init__(
+        self,
+        pages: list[dict],
+        *,
+        items_by_id: dict[str, dict] | None = None,
+    ) -> None:
         self.pages = list(pages)
         self.calls: list[dict] = []
+        self.items_by_id = items_by_id or {}
+        self.get_calls: list[dict] = []
 
     def list(self, **kwargs) -> FakeExecutable:
         self.calls.append(kwargs)
         return FakeExecutable(self.pages.pop(0))
 
+    def get(self, **kwargs) -> FakeExecutable:
+        self.get_calls.append(kwargs)
+        return FakeExecutable(self.items_by_id[kwargs["eventId"]])
+
 
 class FakeCalendarApi:
-    def __init__(self, *, calendars: list[dict], events: list[dict]) -> None:
+    def __init__(
+        self,
+        *,
+        calendars: list[dict],
+        events: list[dict],
+        events_by_id: dict[str, dict] | None = None,
+    ) -> None:
         self.calendar_resource = FakeResource(calendars)
-        self.event_resource = FakeResource(events)
+        self.event_resource = FakeResource(
+            events,
+            items_by_id=events_by_id,
+        )
 
     def calendarList(self) -> FakeResource:
         return self.calendar_resource
@@ -188,6 +212,35 @@ class FakeCalendarApi:
 
 
 class GoogleCalendarServiceTests(unittest.TestCase):
+    def test_get_event_fetches_fresh_current_event_by_exact_id(self) -> None:
+        api = FakeCalendarApi(
+            calendars=[],
+            events=[],
+            events_by_id={
+                "event-1": {
+                    "id": "event-1",
+                    "status": "confirmed",
+                    "summary": "ВП учень 105853087 Наталія (Святослав 14)",
+                    "description": "",
+                    "start": {"dateTime": "2026-06-12T10:00:00+03:00"},
+                    "end": {"dateTime": "2026-06-12T11:00:00+03:00"},
+                },
+            },
+        )
+
+        current = GoogleCalendarService(api).get_event(
+            calendar_id="lessons",
+            event_id="event-1",
+            timezone_name="Europe/Kyiv",
+        )
+
+        self.assertEqual(current.id, "event-1")
+        self.assertTrue(current.summary.startswith("ВП учень"))
+        self.assertEqual(
+            api.event_resource.get_calls,
+            [{"calendarId": "lessons", "eventId": "event-1"}],
+        )
+
     def test_lists_all_calendar_pages_and_marks_primary(self) -> None:
         api = FakeCalendarApi(
             calendars=[
@@ -271,6 +324,7 @@ class GoogleCalendarServiceTests(unittest.TestCase):
         self.assertEqual(first_call["calendarId"], "lessons")
         self.assertEqual(first_call["timeMin"], "2026-06-12T00:00:00+03:00")
         self.assertEqual(first_call["timeMax"], "2026-06-13T00:00:00+03:00")
+        self.assertEqual(first_call["timeZone"], "Europe/Kyiv")
         self.assertTrue(first_call["singleEvents"])
         self.assertEqual(first_call["orderBy"], "startTime")
         self.assertFalse(first_call["showDeleted"])
@@ -321,7 +375,10 @@ class CalendarEventToLessonFormTests(unittest.TestCase):
                 "items": [{
                     "id": "google-event-id",
                     "status": "confirmed",
-                    "summary": "105813989 Ільяс 10р індив ДВІ ГОДИНИ (пробне)",
+                    "summary": (
+                        "105813989 Сервер Османов "
+                        "(Ільяс 10р) Учко ТГ (пробне)"
+                    ),
                     "description": "",
                     "start": {"dateTime": "2026-06-12T10:00:00+03:00"},
                     "end": {"dateTime": "2026-06-12T12:00:00+03:00"},
@@ -338,7 +395,7 @@ class CalendarEventToLessonFormTests(unittest.TestCase):
         form = calendar_event_to_lesson_form(event)
 
         self.assertEqual(form.calendar_event_id, "google-event-id")
-        self.assertEqual(form.event_start, "2026-06-12 10:00")
+        self.assertEqual(form.event_start, "2026-06-12T10:00+03:00")
         self.assertEqual(form.student_id, "105813989")
         self.assertEqual(form.student_name, "Ільяс")
         self.assertEqual(form.lesson_label, "10р індив")
@@ -373,6 +430,37 @@ class CalendarEventToLessonFormTests(unittest.TestCase):
         self.assertEqual(form.student_id, "106248208")
         self.assertEqual(form.student_name, "Поліна")
         self.assertEqual(form.lesson_label, "15р JAVA")
+
+    def test_no_recording_event_becomes_text_only_lesson_without_mp4(self) -> None:
+        event = self._event_from_summary(
+            "105853087 Наталія (Святослав 14 років) "
+            "Учко ТГ (пробне) (без запису)"
+        )
+
+        form = calendar_event_to_lesson_form(event)
+        lesson = create_lesson_from_form(
+            profile_id="main",
+            batch_id="batch",
+            form=form,
+        )
+
+        self.assertTrue(form.is_no_recording)
+        self.assertEqual(form.calendar_status, CalendarEventStatus.NO_RECORDING.value)
+        self.assertEqual(lesson.send_mode, LessonSendMode.TEXT_ONLY)
+        self.assertEqual(lesson.ordered_video_paths, ())
+        self.assertTrue(lesson.caption.endswith("(пробне) (без запису)"))
+        self.assertIsNotNone(lesson.calendar_snapshot)
+
+    def test_cancelled_and_pause_events_cannot_be_imported_as_lessons(self) -> None:
+        for summary in (
+            "ВП учень 105853087 Наталія (Святослав 14) Учко ТГ",
+            "(ПАУЗА ДО ВЕРЕСНЯ) 105853087 Наталія (Святослав 14) Учко ТГ",
+        ):
+            with self.subTest(summary=summary):
+                with self.assertRaises(CalendarEventNotSendable):
+                    calendar_event_to_lesson_form(
+                        self._event_from_summary(summary)
+                    )
 
 
 if __name__ == "__main__":

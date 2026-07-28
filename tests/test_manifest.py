@@ -11,11 +11,97 @@ from lesson_video_uploader.manifest import (
     render_manifest_preview,
     save_manifest,
 )
-from lesson_video_uploader.models import Lesson, LessonDetails
+from lesson_video_uploader.calendar_rules import CalendarEventSnapshot
+from lesson_video_uploader.models import (
+    Lesson,
+    LessonDetails,
+    LessonSendMode,
+)
 from datetime import datetime
 
 
 class ManifestTests(unittest.TestCase):
+    def test_text_only_calendar_lesson_loads_without_videos(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "batch.json"
+            manifest_path.write_text(
+                json.dumps({
+                    "profile_id": "main",
+                    "batch_id": "batch",
+                    "target_peer": "me",
+                    "lessons": [{
+                        "calendar_event_id": "event-text",
+                        "event_start": "2026-06-12T18:00:00+03:00",
+                        "caption": (
+                            "12.06.2026 105853087 Святослав "
+                            "14р індив (без запису)"
+                        ),
+                        "send_mode": "TEXT_ONLY",
+                        "videos": [],
+                    }],
+                }),
+                encoding="utf-8",
+            )
+
+            loaded = load_manifest(manifest_path)
+
+        self.assertEqual(
+            loaded.lessons[0].send_mode,
+            LessonSendMode.TEXT_ONLY,
+        )
+        self.assertEqual(loaded.lessons[0].ordered_video_paths, ())
+
+    def test_calendar_snapshot_survives_saved_manifest_round_trip(self) -> None:
+        snapshot = CalendarEventSnapshot(
+            event_id="event-text",
+            summary="105853087 Наталія (Святослав 15) Учко ТГ",
+            student_id="105853087",
+            student_name="Святослав",
+            student_age=15,
+            local_date="2026-06-12",
+            start="2026-06-12T18:00:00+03:00",
+            end="2026-06-12T19:00:00+03:00",
+            duration_minutes=60,
+            status="NO_RECORDING",
+            is_trial=False,
+            is_no_recording=True,
+            is_transferred=False,
+            is_cancelled=False,
+            is_pause=False,
+        )
+        lesson = Lesson(
+            profile_id="main",
+            batch_id="batch",
+            calendar_event_id="event-text",
+            event_start=datetime.fromisoformat(snapshot.start),
+            caption=(
+                "12.06.2026 105853087 Святослав "
+                "15р індив (без запису)"
+            ),
+            ordered_video_paths=(),
+            send_mode=LessonSendMode.TEXT_ONLY,
+            calendar_snapshot=snapshot,
+            details=LessonDetails(
+                student_id="105853087",
+                student_name="Святослав",
+                lesson_label="15р індив",
+                student_age=15,
+                calendar_status="NO_RECORDING",
+                is_no_recording=True,
+            ),
+        )
+        manifest = UploadManifest("main", "batch", "me", (lesson,))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "batch.json"
+
+            save_manifest(manifest, path)
+            loaded = load_manifest(path)
+
+        restored = loaded.lessons[0]
+        self.assertEqual(restored.calendar_snapshot, snapshot)
+        self.assertEqual(restored.send_mode, LessonSendMode.TEXT_ONLY)
+        self.assertEqual(restored.details, lesson.details)
+
     def test_manifest_builds_one_lesson_with_chronologically_ordered_videos(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

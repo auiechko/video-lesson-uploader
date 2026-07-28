@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -13,6 +12,10 @@ from .credentials import CredentialStore
 
 CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
 CALENDAR_SCOPES = (CALENDAR_READONLY_SCOPE,)
+
+
+class CalendarEventNotSendable(ValueError):
+    pass
 
 
 class GoogleCredentials(Protocol):
@@ -210,6 +213,7 @@ class GoogleCalendarService:
                 "singleEvents": True,
                 "orderBy": "startTime",
                 "showDeleted": False,
+                "timeZone": timezone_name,
             }
             if page_token:
                 kwargs["pageToken"] = page_token
@@ -222,6 +226,28 @@ class GoogleCalendarService:
             if not page_token:
                 break
         return tuple(sorted(events, key=lambda event: (event.start, event.id)))
+
+    def get_event(
+        self,
+        *,
+        calendar_id: str,
+        event_id: str,
+        timezone_name: str,
+    ) -> GoogleCalendarEvent:
+        try:
+            timezone = ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError(f"Невідомий часовий пояс: {timezone_name}") from error
+        item = self.service.events().get(
+            calendarId=calendar_id,
+            eventId=event_id,
+        ).execute()
+        event = self._event_from_api(item, calendar_id, timezone)
+        if event is None:
+            raise ValueError(
+                f"Calendar event {event_id} більше не є активною часовою подією"
+            )
+        return event
 
     @staticmethod
     def _event_from_api(
@@ -264,66 +290,42 @@ def _parse_rfc3339(value: str, fallback_timezone: ZoneInfo) -> datetime:
     )
 
 
-_AGE_PATTERN = re.compile(r"^(?P<age>\d{1,2})\s*р?$", re.IGNORECASE)
-_DURATION_PATTERN = re.compile(
-    r"\b(?:ДВІ|ТРИ)\s+ГОДИНИ\b",
-    re.IGNORECASE,
-)
-_TRIAL_PATTERN = re.compile(r"\(?\bпробн\w*\b\)?", re.IGNORECASE)
-_SERVICE_MARKERS = {"тг", "учечко"}
-
-
-def calendar_event_to_lesson_form(event: GoogleCalendarEvent):
+def calendar_event_to_lesson_form(
+    event: GoogleCalendarEvent,
+    *,
+    timezone_name: str = "Europe/Kyiv",
+):
+    from .calendar_rules import (
+        CalendarEventStatus,
+        build_calendar_snapshot,
+        parse_calendar_event,
+    )
     from .desktop_controller import LessonForm
 
-    summary = " ".join(event.summary.split())
-    student_id_match = re.match(r"^(?P<id>\d+)\b", summary)
-    student_id = student_id_match.group("id") if student_id_match else ""
-    student_name = ""
-    lesson_label = ""
-
-    student_group: re.Match[str] | None = None
-    age = ""
-    for match in re.finditer(r"\(([^()]*)\)", summary):
-        inner_tokens = match.group(1).split()
-        if inner_tokens and (age_match := _AGE_PATTERN.match(inner_tokens[-1])):
-            student_group = match
-            age = age_match.group("age")
-            student_name = " ".join(inner_tokens[:-1]).strip()
-            break
-
-    if student_group is not None:
-        subject = _clean_lesson_text(summary[student_group.end():])
-        lesson_label = f"{age}р {subject or 'індив'}".strip()
-    else:
-        remainder = summary[student_id_match.end():].strip() if student_id_match else summary
-        tokens = remainder.split()
-        if tokens:
-            student_name = tokens[0]
-            lesson_label = _clean_lesson_text(" ".join(tokens[1:]))
-
-    is_trial = bool(
-        _TRIAL_PATTERN.search(f"{event.summary} {event.description}")
-    )
+    parsed = parse_calendar_event(event, timezone_name=timezone_name)
+    if parsed.status in {
+        CalendarEventStatus.IGNORED_CANCELLED,
+        CalendarEventStatus.IGNORED_PAUSE,
+    }:
+        raise CalendarEventNotSendable(
+            f"{parsed.status.value}: подія не є проведеним уроком"
+        )
+    if parsed.status is CalendarEventStatus.PARSE_ERROR:
+        raise CalendarEventNotSendable(
+            f"PARSE_ERROR: {parsed.parse_error}"
+        )
     return LessonForm(
-        calendar_event_id=event.id,
-        event_start=event.start.strftime("%Y-%m-%d %H:%M"),
-        student_id=student_id,
-        student_name=student_name,
-        lesson_label=lesson_label,
-        duration_hours=event.duration_hours,
-        is_trial=is_trial,
+        calendar_event_id=parsed.event_id,
+        event_start=parsed.start.isoformat(timespec="minutes"),
+        student_id=parsed.student_id,
+        student_name=parsed.student_name,
+        lesson_label=parsed.lesson_label,
+        duration_hours=parsed.duration_hours,
+        is_trial=parsed.is_trial,
         video_paths=(),
+        student_age=parsed.student_age,
+        calendar_status=parsed.status.value,
+        is_no_recording=parsed.is_no_recording,
+        is_transferred=parsed.is_transferred,
+        calendar_snapshot=build_calendar_snapshot(parsed),
     )
-
-
-def _clean_lesson_text(value: str) -> str:
-    cleaned = _DURATION_PATTERN.sub(" ", value)
-    cleaned = _TRIAL_PATTERN.sub(" ", cleaned)
-    cleaned = cleaned.replace("|", " ")
-    tokens = [
-        token
-        for token in cleaned.split()
-        if token.casefold().strip("(),") not in _SERVICE_MARKERS
-    ]
-    return " ".join(tokens).strip()
