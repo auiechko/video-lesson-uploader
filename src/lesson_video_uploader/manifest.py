@@ -49,6 +49,11 @@ def _video_paths(lesson: dict[str, Any], root: Path) -> tuple[Path, ...]:
         if not resolved.is_file():
             raise ValueError(f"video does not exist: {resolved}")
         ordered.append((order, resolved.resolve()))
+    orders = [order for order, _ in ordered]
+    if len(set(orders)) != len(orders):
+        # Chronology is the whole point of a lesson, so a tie would otherwise
+        # be broken silently by filename and could reorder a recording.
+        raise ValueError("each video in a lesson needs its own order")
     ordered.sort(key=lambda value: (value[0], value[1].name))
     return tuple(path for _, path in ordered)
 

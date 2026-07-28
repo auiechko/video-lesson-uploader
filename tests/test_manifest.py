@@ -169,6 +169,31 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(loaded.lessons[0].details, details)
 
+    def test_two_videos_claiming_the_same_position_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("one.mp4", "two.mp4"):
+                (root / name).touch()
+            path = root / "batch.json"
+            path.write_text(json.dumps({
+                "profile_id": "p",
+                "batch_id": "b",
+                "target_peer": "group",
+                "lessons": [{
+                    "calendar_event_id": "e",
+                    "event_start": "2026-06-12T10:00:00",
+                    "student_id": "1",
+                    "student_name": "Name",
+                    "lesson_label": "lesson",
+                    "videos": [
+                        {"path": "one.mp4", "order": 1},
+                        {"path": "two.mp4", "order": 1},
+                    ],
+                }]}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "order"):
+                load_manifest(path)
+
     def test_lesson_without_a_caption_still_requires_the_student_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

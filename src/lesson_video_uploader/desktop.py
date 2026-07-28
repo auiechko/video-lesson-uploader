@@ -727,6 +727,7 @@ class DesktopApplication:
     ) -> None:
         if self.busy:
             coroutine.close()
+            self._log("Зачекайте: попередня операція ще виконується.")
             return
         self._set_busy(True, busy_text)
 
