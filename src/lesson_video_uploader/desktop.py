@@ -48,6 +48,48 @@ from .telegram_desktop import (
 )
 
 APP_TITLE = "Lesson Video Uploader"
+CONTROL_KEY_MASK = 0x0004
+VIRTUAL_KEY_V = 86
+
+
+def is_ctrl_v_shortcut(*, state: int | str, keycode: int) -> bool:
+    try:
+        normalized_state = int(state)
+    except ValueError:
+        return False
+    return (
+        bool(normalized_state & CONTROL_KEY_MASK)
+        and keycode == VIRTUAL_KEY_V
+    )
+
+
+def paste_clipboard_into_entry(
+    entry: ttk.Entry,
+    *,
+    clipboard_get: Callable[[], str],
+) -> bool:
+    try:
+        text = clipboard_get()
+    except tk.TclError:
+        return False
+    if not text:
+        return False
+    try:
+        entry.delete("sel.first", "sel.last")
+    except tk.TclError:
+        pass
+    entry.insert(tk.INSERT, text)
+    return True
+
+
+def bind_api_hash_paste(
+    entry: ttk.Entry,
+    *,
+    physical_handler: Callable[[tk.Event[tk.Misc]], str | None],
+    virtual_paste_handler: Callable[[tk.Event[tk.Misc]], str],
+) -> None:
+    entry.bind("<Control-KeyPress>", physical_handler, add="+")
+    entry.bind("<<Paste>>", virtual_paste_handler, add="+")
 
 
 class DesktopApplication:
@@ -473,7 +515,7 @@ class DesktopApplication:
         )
         intro.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 16))
         self._labeled_entry(parent, "Telegram API ID", self.api_id_var, 1, 0)
-        self._labeled_entry(
+        self.api_hash_entry = self._labeled_entry(
             parent,
             "Telegram API hash",
             self.api_hash_var,
@@ -481,9 +523,19 @@ class DesktopApplication:
             0,
             show="•",
         )
+        bind_api_hash_paste(
+            self.api_hash_entry,
+            physical_handler=self._handle_api_hash_keypress,
+            virtual_paste_handler=self._handle_api_hash_virtual_paste,
+        )
         ttk.Label(parent, textvariable=self.secret_status_var).grid(
             row=2, column=2, sticky=tk.W, padx=(12, 0)
         )
+        ttk.Button(
+            parent,
+            text="Вставити",
+            command=self._paste_api_hash,
+        ).grid(row=2, column=3, sticky=tk.W, padx=(10, 0))
         self._labeled_entry(parent, "Номер телефону", self.phone_var, 3, 0)
         self._labeled_entry(
             parent,
@@ -520,6 +572,32 @@ class DesktopApplication:
             style="Subtitle.TLabel",
         ).grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(18, 0))
         parent.columnconfigure(1, weight=1)
+
+    def _paste_api_hash(self) -> None:
+        if not paste_clipboard_into_entry(
+            self.api_hash_entry,
+            clipboard_get=self.root.clipboard_get,
+        ):
+            self._set_status("Буфер обміну порожній")
+
+    def _handle_api_hash_keypress(
+        self,
+        event: tk.Event[tk.Misc],
+    ) -> str | None:
+        if not is_ctrl_v_shortcut(
+            state=event.state,
+            keycode=event.keycode,
+        ):
+            return None
+        self._paste_api_hash()
+        return "break"
+
+    def _handle_api_hash_virtual_paste(
+        self,
+        _event: tk.Event[tk.Misc],
+    ) -> str:
+        self._paste_api_hash()
+        return "break"
 
     @staticmethod
     def _labeled_entry(
