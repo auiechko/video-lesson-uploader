@@ -1,0 +1,26 @@
+{
+  "profile_id": "main",
+  "batch_id": "2026-06-12",
+  "target_peer": -1001234567890,
+  "lessons": [
+    {
+      "calendar_event_id": "calendar-event-105813989-2026-06-12",
+      "event_start": "2026-06-12T10:00:00+03:00",
+      "student_id": "105813989",
+      "student_name": "Ільяс",
+      "lesson_label": "10р індив",
+      "duration_hours": 2,
+      "is_trial": false,
+      "videos": [
+        {
+          "path": "videos/video_part_1.mp4",
+          "order": 1
+        },
+        {
+          "path": "videos/video_part_2.mp4",
+          "order": 2
+        }
+      ]
+    }
+  ]
+}
