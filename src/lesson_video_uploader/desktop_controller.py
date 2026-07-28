@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import AppConfig, load_config, save_config
-from .credentials import CredentialStore
+from .credentials import CredentialStore, resolve_api_hash
 from .manifest import UploadManifest
 from .models import Lesson
 from .planning import build_caption
@@ -85,12 +85,10 @@ class DesktopSettingsController:
         )
 
     def require_api_hash(self) -> str:
-        secret = self.credential_store.get_secret()
-        if not secret:
-            raise ValueError(
-                "Telegram API hash ще не збережений у Windows Credential Manager"
-            )
-        return secret
+        return resolve_api_hash(
+            self.load().config.api_hash_env,
+            self.credential_store,
+        )
 
 
 def parse_target_peer(value: str) -> int | str:

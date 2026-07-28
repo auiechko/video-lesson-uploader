@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from lesson_video_uploader.desktop_controller import (
     DesktopSettingsController,
@@ -88,8 +90,18 @@ class DesktopSettingsControllerTests(unittest.TestCase):
                 Path(directory) / "config.toml",
                 FakeCredentialStore(),
             )
-            with self.assertRaisesRegex(ValueError, "API hash"):
-                controller.require_api_hash()
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(ValueError, "API hash"):
+                    controller.require_api_hash()
+
+    def test_environment_variable_is_accepted_instead_of_the_vault(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = DesktopSettingsController(
+                Path(directory) / "config.toml",
+                FakeCredentialStore(),
+            )
+            with patch.dict(os.environ, {"TELEGRAM_API_HASH": "from-env"}, clear=True):
+                self.assertEqual(controller.require_api_hash(), "from-env")
 
 
 class TargetPeerTests(unittest.TestCase):

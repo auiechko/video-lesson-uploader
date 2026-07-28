@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import ctypes
 import importlib
+import os
 import sys
 import unittest
 from unittest.mock import patch
 
-from lesson_video_uploader.credentials import WindowsCredentialStore
+from lesson_video_uploader.credentials import WindowsCredentialStore, resolve_api_hash
 
 
 class _RejectWintypes:
@@ -50,6 +51,55 @@ class CredentialsImportTests(unittest.TestCase):
         with patch("lesson_video_uploader.credentials.os.name", "posix"):
             with self.assertRaisesRegex(RuntimeError, "Windows"):
                 store.get_secret()
+
+
+class FakeCredentialStore:
+    def __init__(self, secret: str | None = None) -> None:
+        self.value = secret
+
+    def get_secret(self) -> str | None:
+        return self.value
+
+    def set_secret(self, secret: str) -> None:
+        self.value = secret
+
+    def delete_secret(self) -> None:
+        self.value = None
+
+
+class ResolveApiHashTests(unittest.TestCase):
+    """The CLI and the GUI must accept the same secret from either store."""
+
+    def test_environment_variable_takes_precedence(self) -> None:
+        with patch.dict(os.environ, {"TELEGRAM_API_HASH": " from-env "}, clear=True):
+            secret = resolve_api_hash(
+                "TELEGRAM_API_HASH",
+                FakeCredentialStore("from-vault"),
+            )
+        self.assertEqual(secret, "from-env")
+
+    def test_credential_manager_is_used_when_the_variable_is_unset(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            secret = resolve_api_hash(
+                "TELEGRAM_API_HASH",
+                FakeCredentialStore("from-vault"),
+            )
+        self.assertEqual(secret, "from-vault")
+
+    def test_missing_secret_names_both_places_to_put_it(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(ValueError) as caught:
+                resolve_api_hash("TELEGRAM_API_HASH", FakeCredentialStore(None))
+        message = str(caught.exception)
+        self.assertIn("API hash", message)
+        self.assertIn("TELEGRAM_API_HASH", message)
+        self.assertIn("Credential Manager", message)
+
+    def test_vault_is_not_consulted_on_non_windows_platforms(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("lesson_video_uploader.credentials.os.name", "posix"):
+                with self.assertRaises(ValueError):
+                    resolve_api_hash("TELEGRAM_API_HASH")
 
 
 if __name__ == "__main__":

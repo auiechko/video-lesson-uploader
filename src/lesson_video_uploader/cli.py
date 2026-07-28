@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from .config import AppConfig, load_config
+from .credentials import resolve_api_hash
 from .manifest import UploadManifest, load_manifest, render_manifest_preview
 from .models import Lesson, SendStatus
 from .persistence import SQLiteSendItemRepository
@@ -58,12 +58,7 @@ def _load_optional_config(path: Path) -> AppConfig:
 def _telegram_credentials(config: AppConfig) -> tuple[int, str]:
     if config.api_id is None:
         raise ValueError("telegram.api_id is required in config.toml")
-    api_hash = os.environ.get(config.api_hash_env)
-    if not api_hash:
-        raise ValueError(
-            f"set the {config.api_hash_env} environment variable with Telegram api_hash"
-        )
-    return config.api_id, api_hash
+    return config.api_id, resolve_api_hash(config.api_hash_env)
 
 
 def _telegram_client_class():

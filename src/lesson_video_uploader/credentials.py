@@ -126,3 +126,29 @@ class WindowsCredentialStore:
             error = ctypes.get_last_error()
             if error != self._ERROR_NOT_FOUND:
                 raise ctypes.WinError(error)
+
+
+def resolve_api_hash(
+    env_name: str,
+    store: CredentialStore | None = None,
+) -> str:
+    """Find the Telegram api_hash wherever the user happened to put it.
+
+    The GUI writes it to Windows Credential Manager and the CLI has always
+    read an environment variable; both entry points go through here so a
+    secret saved in one is usable from the other. The variable wins, which
+    keeps an explicit override working on machines without the vault.
+    """
+    from_environment = os.environ.get(env_name, "").strip()
+    if from_environment:
+        return from_environment
+    if store is None and os.name == "nt":
+        store = WindowsCredentialStore()
+    if store is not None:
+        secret = (store.get_secret() or "").strip()
+        if secret:
+            return secret
+    raise ValueError(
+        "Telegram API hash не знайдено: збережіть його у Windows Credential "
+        f"Manager або задайте змінну середовища {env_name}"
+    )
