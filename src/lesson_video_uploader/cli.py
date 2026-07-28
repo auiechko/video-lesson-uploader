@@ -48,6 +48,17 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(".lesson-video-uploader") / "deliveries.sqlite3",
     )
+    chats = subcommands.add_parser(
+        "chats",
+        help="Показати ID чатів, доступних цьому акаунту",
+    )
+    chats.add_argument("--config", type=Path, default=Path("config.toml"))
+    chats.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Скільки останніх діалогів показати",
+    )
     return parser
 
 
@@ -126,6 +137,32 @@ async def _send(
             print(_delivery_summary(result))
 
 
+def render_dialogs(dialogs: Sequence[object]) -> str:
+    """List chats as `target_peer` values ready to paste into a manifest."""
+    lines = ["ID\tНазва"]
+    for dialog in dialogs:
+        entity_id = getattr(dialog, "id", None)
+        if not isinstance(entity_id, int):
+            continue
+        name = getattr(dialog, "name", None) or getattr(dialog, "title", None) or ""
+        lines.append(f"{entity_id}\t{str(name).strip()}")
+    if len(lines) == 1:
+        return "Доступних чатів не знайдено."
+    return "\n".join(lines)
+
+
+async def _chats(config: AppConfig, limit: int) -> None:
+    api_id, api_hash = _telegram_credentials(config)
+    TelegramClient = _telegram_client_class()
+    async with TelegramClient(config.session, api_id, api_hash) as client:
+        dialogs = await client.get_dialogs(limit=limit)
+    print(render_dialogs(list(dialogs)))
+    print(
+        "\nПідставте потрібний ID у поле target_peer маніфесту "
+        "або в поле «Telegram-чат» у застосунку."
+    )
+
+
 async def _reconcile(
     manifest: UploadManifest,
     config: AppConfig,
@@ -163,6 +200,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     try:
         args = parser.parse_args(argv)
+        if args.command == "chats":
+            asyncio.run(_chats(_load_optional_config(args.config), args.limit))
+            return 0
         manifest = load_manifest(args.manifest)
         if args.command == "preview":
             print(render_manifest_preview(manifest, expand=args.expand))
