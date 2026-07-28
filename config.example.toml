@@ -1,0 +1,10 @@
+[telegram]
+api_id = 12345678
+# Сам api_hash не зберігається у файлі. Тут указана назва змінної середовища.
+api_hash_env = "TELEGRAM_API_HASH"
+session = ".lesson-video-uploader/telegram"
+phone = "+380991234567"
+
+[caption]
+# Використовується лише коли один урок має понад 10 MP4.
+album_batch = " (альбом {album_number}/{album_count})"
