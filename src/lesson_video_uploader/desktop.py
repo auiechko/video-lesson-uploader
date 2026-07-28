@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import tkinter as tk
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -16,6 +16,13 @@ from .desktop_controller import (
     build_gui_manifest,
     create_lesson_from_form,
     form_from_lesson,
+)
+from .google_calendar import (
+    GoogleCalendarEvent,
+    GoogleCalendarInfo,
+    GoogleCalendarService,
+    GoogleOAuthManager,
+    calendar_event_to_lesson_form,
 )
 from .manifest import UploadManifest, load_manifest, save_manifest
 from .models import Lesson, SendStatus
@@ -43,6 +50,13 @@ class DesktopApplication:
             self.config_path,
             WindowsCredentialStore(),
         )
+        self.google_token_store = WindowsCredentialStore(
+            target_name="lesson-video-uploader/google-calendar-oauth",
+            username="google-calendar",
+        )
+        self.google_service: GoogleCalendarService | None = None
+        self.google_events: list[GoogleCalendarEvent] = []
+        self.google_calendar_by_label: dict[str, GoogleCalendarInfo] = {}
         self.lessons: list[Lesson] = []
         self.pending_video_paths: list[Path] = []
         self.busy = False
@@ -87,6 +101,12 @@ class DesktopApplication:
         self.secret_status_var = tk.StringVar(value="API hash ще не збережений")
         self.status_var = tk.StringVar(value="Готово")
         self.progress_var = tk.DoubleVar(value=0)
+        self.google_credentials_var = tk.StringVar()
+        self.google_calendar_var = tk.StringVar(value="primary")
+        self.google_timezone_var = tk.StringVar(value="Europe/Kyiv")
+        self.google_from_var = tk.StringVar(value=today)
+        self.google_to_var = tk.StringVar(value=today)
+        self.google_status_var = tk.StringVar(value="Google Calendar не підключений")
 
     def _build_layout(self) -> None:
         outer = ttk.Frame(self.root, padding=18)
@@ -101,13 +121,16 @@ class DesktopApplication:
             style="Subtitle.TLabel",
         ).pack(anchor=tk.W, pady=(2, 14))
 
-        notebook = ttk.Notebook(outer)
-        notebook.pack(fill=tk.BOTH, expand=True)
-        send_tab = ttk.Frame(notebook, padding=14)
-        settings_tab = ttk.Frame(notebook, padding=18)
-        notebook.add(send_tab, text="  Уроки та надсилання  ")
-        notebook.add(settings_tab, text="  Telegram і безпека  ")
-        self._build_send_tab(send_tab)
+        self.notebook = ttk.Notebook(outer)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+        self.send_tab = ttk.Frame(self.notebook, padding=14)
+        google_tab = ttk.Frame(self.notebook, padding=14)
+        settings_tab = ttk.Frame(self.notebook, padding=18)
+        self.notebook.add(self.send_tab, text="  Уроки та надсилання  ")
+        self.notebook.add(google_tab, text="  Google Calendar  ")
+        self.notebook.add(settings_tab, text="  Telegram і безпека  ")
+        self._build_send_tab(self.send_tab)
+        self._build_google_tab(google_tab)
         self._build_settings_tab(settings_tab)
 
         footer = ttk.Frame(outer)
@@ -284,6 +307,130 @@ class DesktopApplication:
             command=self._remove_lesson,
         ).pack(side=tk.LEFT)
 
+    def _build_google_tab(self, parent: ttk.Frame) -> None:
+        connection = ttk.LabelFrame(
+            parent,
+            text="Підключення Google Calendar",
+            padding=10,
+        )
+        connection.pack(fill=tk.X)
+        ttk.Label(connection, text="OAuth credentials.json").grid(
+            row=0,
+            column=0,
+            sticky=tk.W,
+            padx=(0, 6),
+            pady=5,
+        )
+        ttk.Entry(
+            connection,
+            textvariable=self.google_credentials_var,
+        ).grid(row=0, column=1, sticky=tk.EW, pady=5)
+        browse_button = ttk.Button(
+            connection,
+            text="Вибрати файл…",
+            command=self._pick_google_credentials,
+        )
+        browse_button.grid(row=0, column=2, padx=(8, 0), pady=5)
+        connect_button = ttk.Button(
+            connection,
+            text="Підключити Google",
+            style="Primary.TButton",
+            command=self._connect_google_calendar,
+        )
+        connect_button.grid(row=1, column=1, sticky=tk.W, pady=(8, 0))
+        disconnect_button = ttk.Button(
+            connection,
+            text="Відключити",
+            command=self._disconnect_google_calendar,
+        )
+        disconnect_button.grid(row=1, column=2, padx=(8, 0), pady=(8, 0))
+        ttk.Label(
+            connection,
+            textvariable=self.google_status_var,
+            style="Subtitle.TLabel",
+        ).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+        connection.columnconfigure(1, weight=1)
+
+        filters = ttk.LabelFrame(parent, text="Події", padding=10)
+        filters.pack(fill=tk.X, pady=(12, 0))
+        ttk.Label(filters, text="Календар").grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 6), pady=5
+        )
+        self.google_calendar_combo = ttk.Combobox(
+            filters,
+            textvariable=self.google_calendar_var,
+            state="normal",
+        )
+        self.google_calendar_combo.grid(
+            row=0,
+            column=1,
+            columnspan=3,
+            sticky=tk.EW,
+            pady=5,
+        )
+        self._labeled_entry(filters, "Від", self.google_from_var, 1, 0)
+        self._labeled_entry(filters, "До", self.google_to_var, 1, 2)
+        self._labeled_entry(
+            filters,
+            "Часовий пояс",
+            self.google_timezone_var,
+            2,
+            0,
+            width=24,
+        )
+        load_button = ttk.Button(
+            filters,
+            text="Завантажити події",
+            style="Primary.TButton",
+            command=self._load_google_events,
+        )
+        load_button.grid(row=2, column=3, sticky=tk.E, pady=5)
+        filters.columnconfigure(1, weight=1)
+        filters.columnconfigure(3, weight=1)
+
+        columns = ("start", "duration", "summary", "event_id")
+        self.google_event_tree = ttk.Treeview(
+            parent,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            height=11,
+        )
+        self.google_event_tree.heading("start", text="Початок")
+        self.google_event_tree.heading("duration", text="Год.")
+        self.google_event_tree.heading("summary", text="Назва події")
+        self.google_event_tree.heading("event_id", text="Google event ID")
+        self.google_event_tree.column("start", width=135, stretch=False)
+        self.google_event_tree.column(
+            "duration",
+            width=55,
+            anchor=tk.CENTER,
+            stretch=False,
+        )
+        self.google_event_tree.column("summary", width=430)
+        self.google_event_tree.column("event_id", width=230)
+        self.google_event_tree.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
+        self.google_event_tree.bind(
+            "<Double-1>",
+            lambda _event: self._import_google_event(),
+        )
+        import_button = ttk.Button(
+            parent,
+            text="Імпортувати вибрану подію в урок",
+            style="Primary.TButton",
+            command=self._import_google_event,
+        )
+        import_button.pack(anchor=tk.E, pady=(10, 0))
+        self.action_buttons.extend(
+            (
+                browse_button,
+                connect_button,
+                disconnect_button,
+                load_button,
+                import_button,
+            )
+        )
+
     def _build_settings_tab(self, parent: ttk.Frame) -> None:
         intro = ttk.Label(
             parent,
@@ -380,11 +527,191 @@ class DesktopApplication:
         self.api_id_var.set("" if config.api_id is None else str(config.api_id))
         self.phone_var.set(config.phone)
         self.session_var.set(config.session)
+        self.google_credentials_var.set(config.google_client_secrets)
+        self.google_calendar_var.set(config.google_calendar_id)
+        self.google_timezone_var.set(config.google_timezone)
         self.secret_status_var.set(
             "API hash збережений у Credential Manager"
             if loaded.api_hash_saved
             else "API hash ще не збережений"
         )
+
+    def _pick_google_credentials(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="Виберіть Google OAuth credentials.json",
+            filetypes=[("JSON", "*.json")],
+        )
+        if selected:
+            self.google_credentials_var.set(selected)
+
+    def _save_google_settings(self) -> bool:
+        try:
+            self.settings.save_google_calendar(
+                client_secrets=self.google_credentials_var.get(),
+                calendar_id=self._selected_google_calendar_id(),
+                timezone_name=self.google_timezone_var.get(),
+            )
+        except Exception as error:
+            self._show_error(error)
+            return False
+        return True
+
+    def _connect_google_calendar(self) -> None:
+        if not self._save_google_settings():
+            return
+        credentials_path = Path(self.google_credentials_var.get()).expanduser()
+
+        async def connect() -> tuple[
+            GoogleCalendarService,
+            tuple[GoogleCalendarInfo, ...],
+        ]:
+            manager = GoogleOAuthManager(self.google_token_store)
+            credentials = await asyncio.to_thread(
+                manager.authorize,
+                credentials_path,
+            )
+            service = await asyncio.to_thread(
+                GoogleCalendarService.from_credentials,
+                credentials,
+            )
+            calendars = await asyncio.to_thread(service.list_calendars)
+            return service, calendars
+
+        self._run_async(
+            connect(),
+            self._google_connected,
+            "Підключення Google Calendar…",
+        )
+
+    def _google_connected(
+        self,
+        result: tuple[
+            GoogleCalendarService,
+            tuple[GoogleCalendarInfo, ...],
+        ],
+    ) -> None:
+        service, calendars = result
+        self.google_service = service
+        self.google_calendar_by_label.clear()
+        labels: list[str] = []
+        selected_label = ""
+        configured_id = self.settings.load().config.google_calendar_id
+        for calendar in calendars:
+            label = (
+                f"{calendar.summary} — {calendar.id}"
+                + (" (основний)" if calendar.primary else "")
+            )
+            labels.append(label)
+            self.google_calendar_by_label[label] = calendar
+            if calendar.id == configured_id:
+                selected_label = label
+            elif not selected_label and configured_id == "primary" and calendar.primary:
+                selected_label = label
+        self.google_calendar_combo.configure(values=labels)
+        if selected_label:
+            self.google_calendar_var.set(selected_label)
+        elif labels:
+            self.google_calendar_var.set(labels[0])
+        self.google_status_var.set(
+            f"Підключено. Доступно календарів: {len(calendars)}"
+        )
+        self._log("Google Calendar підключено в режимі лише читання.")
+
+    def _selected_google_calendar_id(self) -> str:
+        selected = self.google_calendar_var.get().strip()
+        calendar = self.google_calendar_by_label.get(selected)
+        return calendar.id if calendar is not None else selected
+
+    def _load_google_events(self) -> None:
+        if self.google_service is None:
+            self._show_error(
+                ValueError("Спочатку натисніть «Підключити Google».")
+            )
+            return
+        try:
+            date_from = date.fromisoformat(self.google_from_var.get().strip())
+            date_to = date.fromisoformat(self.google_to_var.get().strip())
+        except ValueError as error:
+            self._show_error(
+                ValueError("Дати мають формат РРРР-ММ-ДД")
+            )
+            return
+        if not self._save_google_settings():
+            return
+        calendar_id = self._selected_google_calendar_id()
+        timezone_name = self.google_timezone_var.get().strip()
+
+        async def load_events() -> tuple[GoogleCalendarEvent, ...]:
+            assert self.google_service is not None
+            return await asyncio.to_thread(
+                self.google_service.list_events,
+                calendar_id=calendar_id,
+                date_from=date_from,
+                date_to=date_to,
+                timezone_name=timezone_name,
+            )
+
+        self._run_async(
+            load_events(),
+            self._google_events_loaded,
+            "Завантаження подій Google Calendar…",
+        )
+
+    def _google_events_loaded(
+        self,
+        events: tuple[GoogleCalendarEvent, ...],
+    ) -> None:
+        self.google_events = list(events)
+        self.google_event_tree.delete(*self.google_event_tree.get_children())
+        for index, event in enumerate(events):
+            self.google_event_tree.insert(
+                "",
+                tk.END,
+                iid=str(index),
+                values=(
+                    event.start.strftime("%d.%m.%Y %H:%M"),
+                    event.duration_hours,
+                    event.summary,
+                    event.id,
+                ),
+            )
+        self.google_status_var.set(f"Завантажено подій: {len(events)}")
+        self._log(f"Google Calendar: завантажено {len(events)} подій.")
+
+    def _import_google_event(self) -> None:
+        selection = self.google_event_tree.selection()
+        if not selection:
+            self._show_error(ValueError("Виберіть подію календаря."))
+            return
+        event = self.google_events[int(selection[0])]
+        form = calendar_event_to_lesson_form(event)
+        self.event_id_var.set(form.calendar_event_id)
+        self.start_var.set(form.event_start)
+        self.student_id_var.set(form.student_id)
+        self.student_name_var.set(form.student_name)
+        self.lesson_label_var.set(form.lesson_label)
+        self.duration_var.set(str(form.duration_hours))
+        self.trial_var.set(form.is_trial)
+        self.notebook.select(self.send_tab)
+        self._log(
+            "Імпортовано подію Google Calendar. "
+            "Перевірте поля уроку та додайте MP4."
+        )
+
+    def _disconnect_google_calendar(self) -> None:
+        if not messagebox.askyesno(
+            APP_TITLE,
+            "Видалити збережений Google OAuth token з Credential Manager?",
+        ):
+            return
+        GoogleOAuthManager(self.google_token_store).disconnect()
+        self.google_service = None
+        self.google_events.clear()
+        self.google_calendar_by_label.clear()
+        self.google_calendar_combo.configure(values=())
+        self.google_event_tree.delete(*self.google_event_tree.get_children())
+        self.google_status_var.set("Google Calendar не підключений")
+        self._log("Google Calendar відключено; OAuth token видалено.")
 
     def _save_settings(self, *, quiet: bool = False) -> bool:
         try:
