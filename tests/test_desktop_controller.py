@@ -3,14 +3,17 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from lesson_video_uploader.models import Lesson
 from lesson_video_uploader.desktop_controller import (
     DesktopSettingsController,
     LessonForm,
     build_gui_manifest,
     create_lesson_from_form,
+    form_from_lesson,
     parse_target_peer,
 )
 
@@ -193,6 +196,49 @@ class LessonFormTests(unittest.TestCase):
                         video_paths=(path,),
                     ),
                 )
+
+    def test_lesson_can_be_pulled_back_into_the_editor_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = (root / "part-1.mp4", root / "part-2.mp4")
+            for path in paths:
+                path.touch()
+            form = LessonForm(
+                calendar_event_id="event-1",
+                event_start="2026-06-12 10:30",
+                student_id="105813989",
+                student_name="Іван Петров",
+                lesson_label="10р індив",
+                duration_hours=2,
+                is_trial=True,
+                video_paths=paths,
+            )
+            lesson = create_lesson_from_form(
+                profile_id="main",
+                batch_id="batch",
+                form=form,
+            )
+
+            restored = form_from_lesson(lesson)
+
+        self.assertEqual(restored, form)
+
+    def test_lesson_without_details_returns_blank_student_fields(self) -> None:
+        lesson = Lesson(
+            profile_id="main",
+            batch_id="batch",
+            calendar_event_id="event-1",
+            event_start=datetime(2026, 6, 12, 10, 30),
+            caption="написаний вручну caption",
+            ordered_video_paths=(Path("one.mp4"),),
+        )
+
+        restored = form_from_lesson(lesson)
+
+        self.assertEqual(restored.student_name, "")
+        self.assertEqual(restored.duration_hours, 1)
+        self.assertEqual(restored.event_start, "2026-06-12 10:30")
+        self.assertEqual(restored.video_paths, (Path("one.mp4"),))
 
     def test_form_rejects_blank_student_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

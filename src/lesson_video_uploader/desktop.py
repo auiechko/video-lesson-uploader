@@ -15,6 +15,7 @@ from .desktop_controller import (
     LessonForm,
     build_gui_manifest,
     create_lesson_from_form,
+    form_from_lesson,
 )
 from .manifest import UploadManifest, load_manifest, save_manifest
 from .models import Lesson, SendStatus
@@ -270,11 +271,18 @@ class DesktopApplication:
         )
         self.preview_files = tk.Listbox(parent, height=7, font=("Segoe UI", 9))
         self.preview_files.pack(fill=tk.BOTH, expand=True)
+        buttons = ttk.Frame(parent)
+        buttons.pack(anchor=tk.E, pady=(8, 0))
         ttk.Button(
-            parent,
+            buttons,
+            text="Редагувати вибраний урок",
+            command=self._edit_lesson,
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            buttons,
             text="Видалити вибраний урок",
             command=self._remove_lesson,
-        ).pack(anchor=tk.E, pady=(8, 0))
+        ).pack(side=tk.LEFT)
 
     def _build_settings_tab(self, parent: ttk.Frame) -> None:
         intro = ttk.Label(
@@ -502,6 +510,41 @@ class DesktopApplication:
         lesson = self.lessons[int(selection[0])]
         for index, path in enumerate(lesson.ordered_video_paths, start=1):
             self.preview_files.insert(tk.END, f"{index}. {path}")
+
+    def _edit_lesson(self) -> None:
+        """Move the selected lesson back into the editor.
+
+        It leaves the batch while being edited, so re-adding it is not blocked
+        by its own Calendar event ID.
+        """
+        selection = self.lesson_tree.selection()
+        if not selection:
+            return
+        if self.pending_video_paths and not messagebox.askyesno(
+            APP_TITLE,
+            "У редакторі вже є вибрані відео. Замінити їх уроком із пакета?",
+        ):
+            return
+        lesson = self.lessons.pop(int(selection[0]))
+        form = form_from_lesson(lesson)
+        self.event_id_var.set(form.calendar_event_id)
+        self.start_var.set(form.event_start)
+        self.student_id_var.set(form.student_id)
+        self.student_name_var.set(form.student_name)
+        self.lesson_label_var.set(form.lesson_label)
+        self.duration_var.set(str(form.duration_hours))
+        self.trial_var.set(form.is_trial)
+        self.pending_video_paths = list(form.video_paths)
+        self._refresh_pending_files()
+        self._refresh_lessons()
+        self.preview_files.delete(0, tk.END)
+        if lesson.details is None:
+            self._log(
+                "Урок мав власний caption — заповніть поля учня заново "
+                "перед додаванням."
+            )
+        else:
+            self._log(f"Урок у редакторі: {lesson.caption}")
 
     def _remove_lesson(self) -> None:
         selection = self.lesson_tree.selection()

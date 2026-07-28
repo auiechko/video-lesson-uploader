@@ -12,3 +12,4 @@ config.toml
 .env
 batch*.json
 !manifest.example.json
+.idea/

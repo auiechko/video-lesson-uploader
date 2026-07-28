@@ -152,6 +152,27 @@ def create_lesson_from_form(
     )
 
 
+def form_from_lesson(lesson: Lesson) -> LessonForm:
+    """Turn a lesson back into editor fields.
+
+    A batch written by hand may carry only a caption, with nothing to fill the
+    student fields from. Those come back empty rather than guessed, so the
+    caption is retyped deliberately instead of silently rebuilt from parsed
+    fragments.
+    """
+    details = lesson.details
+    return LessonForm(
+        calendar_event_id=lesson.calendar_event_id,
+        event_start=lesson.event_start.strftime("%Y-%m-%d %H:%M"),
+        student_id=details.student_id if details else "",
+        student_name=details.student_name if details else "",
+        lesson_label=details.lesson_label if details else "",
+        duration_hours=details.duration_hours if details else 1,
+        is_trial=details.is_trial if details else False,
+        video_paths=lesson.ordered_video_paths,
+    )
+
+
 def build_gui_manifest(
     *,
     profile_id: str,
