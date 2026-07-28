@@ -5,6 +5,13 @@ api_hash_env = "TELEGRAM_API_HASH"
 session = ".lesson-video-uploader/telegram"
 phone = "+380991234567"
 
+[google_calendar]
+# Шлях можна вибрати у GUI. Файл створюється в Google Cloud як OAuth Client
+# типу Desktop app; сам файл не додавайте до Git.
+client_secrets = ""
+calendar_id = "primary"
+timezone = "Europe/Kyiv"
+
 [caption]
 # Використовується лише коли один урок має понад 10 MP4.
 album_batch = " (альбом {album_number}/{album_count})"
