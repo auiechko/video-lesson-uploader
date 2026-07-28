@@ -7,9 +7,10 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from lesson_video_uploader.cli import _delivery_summary, main
+from lesson_video_uploader.cli import _delivery_summary, main, render_dialogs
 from lesson_video_uploader.models import Lesson, SendStatus
 from lesson_video_uploader.sender import ManualReviewRequired
 
@@ -101,6 +102,32 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         reconcile.assert_awaited_once()
+
+
+class ChatsCommandTests(unittest.TestCase):
+    def test_dialogs_are_rendered_as_pastable_target_peer_values(self) -> None:
+        output = render_dialogs([
+            SimpleNamespace(id=-1001234567890, name="Уроки"),
+            SimpleNamespace(id=777000, name="Telegram"),
+        ])
+
+        self.assertIn("-1001234567890\tУроки", output)
+        self.assertIn("777000\tTelegram", output)
+
+    def test_empty_dialog_list_says_so_instead_of_printing_a_bare_header(self) -> None:
+        self.assertEqual(render_dialogs([]), "Доступних чатів не знайдено.")
+
+    def test_chats_command_needs_no_manifest(self) -> None:
+        with patch(
+            "lesson_video_uploader.cli._chats",
+            new_callable=AsyncMock,
+            create=True,
+        ) as chats:
+            with redirect_stdout(io.StringIO()):
+                result = main(["chats"])
+
+        self.assertEqual(result, 0)
+        chats.assert_awaited_once()
 
 
 if __name__ == "__main__":

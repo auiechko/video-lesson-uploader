@@ -148,6 +148,42 @@ class SenderTests(unittest.IsolatedAsyncioTestCase):
             await sender.send(item, target_peer="group")
         self.client.send_file.assert_awaited_once()
 
+    async def test_progress_is_reported_across_the_lesson_not_per_file(self) -> None:
+        root = Path(self.temp_dir.name)
+        sizes = (100, 300)
+        paths = []
+        for number, size in enumerate(sizes):
+            path = root / f"part-{number}.mp4"
+            path.write_bytes(b"x" * size)
+            paths.append(path)
+        item = Lesson(
+            profile_id="profile-1",
+            batch_id="batch-1",
+            calendar_event_id="event-1",
+            event_start=datetime(2026, 6, 12, 10),
+            caption="12.06.2026 105813989 Ільяс 10р індив",
+            ordered_video_paths=tuple(paths),
+        )
+        self.client.send_file.return_value = [
+            SimpleNamespace(id=101, grouped_id=777),
+            SimpleNamespace(id=102, grouped_id=777),
+        ]
+        reported: list[tuple[int, int]] = []
+        sender = TelethonLessonSender(self.client, self.repository)
+
+        await sender.send(
+            item,
+            target_peer="group",
+            progress_callback=lambda current, total: reported.append((current, total)),
+        )
+
+        telethon_callback = self.client.send_file.await_args.kwargs["progress_callback"]
+        telethon_callback(50, 100)
+        telethon_callback(100, 100)
+        telethon_callback(150, 300)
+
+        self.assertEqual(reported, [(50, 400), (100, 400), (250, 400)])
+
     async def test_successful_item_is_idempotent_on_next_run(self) -> None:
         self.client.send_file.return_value = [
             SimpleNamespace(id=101, grouped_id=777),

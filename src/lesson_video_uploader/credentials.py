@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
-from ctypes import wintypes
-from typing import Protocol
+from typing import Any, Protocol
 
 
 class CredentialStore(Protocol):
@@ -12,21 +11,52 @@ class CredentialStore(Protocol):
     def delete_secret(self) -> None: ...
 
 
-class _CREDENTIALW(ctypes.Structure):
-    _fields_ = [
-        ("Flags", wintypes.DWORD),
-        ("Type", wintypes.DWORD),
-        ("TargetName", wintypes.LPWSTR),
-        ("Comment", wintypes.LPWSTR),
-        ("LastWritten", wintypes.FILETIME),
-        ("CredentialBlobSize", wintypes.DWORD),
-        ("CredentialBlob", ctypes.POINTER(wintypes.BYTE)),
-        ("Persist", wintypes.DWORD),
-        ("AttributeCount", wintypes.DWORD),
-        ("Attributes", wintypes.LPVOID),
-        ("TargetAlias", wintypes.LPWSTR),
-        ("UserName", wintypes.LPWSTR),
+def _windows_api() -> tuple[Any, type[ctypes.Structure]]:
+    """Load Advapi32 and describe the CREDENTIALW layout it expects.
+
+    Both are built on first use instead of at import time: ``ctypes.wintypes``
+    raises on any non-Windows interpreter, and this module has to stay
+    importable there so the Linux test run can reach the desktop code.
+    """
+    if os.name != "nt":
+        raise RuntimeError("Windows Credential Manager is available only on Windows")
+    from ctypes import wintypes
+
+    class _CREDENTIALW(ctypes.Structure):
+        _fields_ = [
+            ("Flags", wintypes.DWORD),
+            ("Type", wintypes.DWORD),
+            ("TargetName", wintypes.LPWSTR),
+            ("Comment", wintypes.LPWSTR),
+            ("LastWritten", wintypes.FILETIME),
+            ("CredentialBlobSize", wintypes.DWORD),
+            ("CredentialBlob", ctypes.POINTER(wintypes.BYTE)),
+            ("Persist", wintypes.DWORD),
+            ("AttributeCount", wintypes.DWORD),
+            ("Attributes", wintypes.LPVOID),
+            ("TargetAlias", wintypes.LPWSTR),
+            ("UserName", wintypes.LPWSTR),
+        ]
+
+    api = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+    api.CredReadW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.POINTER(_CREDENTIALW)),
     ]
+    api.CredReadW.restype = wintypes.BOOL
+    api.CredWriteW.argtypes = [ctypes.POINTER(_CREDENTIALW), wintypes.DWORD]
+    api.CredWriteW.restype = wintypes.BOOL
+    api.CredDeleteW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    api.CredDeleteW.restype = wintypes.BOOL
+    api.CredFree.argtypes = [wintypes.LPVOID]
+    api.CredFree.restype = None
+    return api, _CREDENTIALW
 
 
 class WindowsCredentialStore:
@@ -44,33 +74,9 @@ class WindowsCredentialStore:
         self.target_name = target_name
         self.username = username
 
-    @staticmethod
-    def _api():
-        if os.name != "nt":
-            raise RuntimeError("Windows Credential Manager is available only on Windows")
-        api = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
-        api.CredReadW.argtypes = [
-            wintypes.LPCWSTR,
-            wintypes.DWORD,
-            wintypes.DWORD,
-            ctypes.POINTER(ctypes.POINTER(_CREDENTIALW)),
-        ]
-        api.CredReadW.restype = wintypes.BOOL
-        api.CredWriteW.argtypes = [ctypes.POINTER(_CREDENTIALW), wintypes.DWORD]
-        api.CredWriteW.restype = wintypes.BOOL
-        api.CredDeleteW.argtypes = [
-            wintypes.LPCWSTR,
-            wintypes.DWORD,
-            wintypes.DWORD,
-        ]
-        api.CredDeleteW.restype = wintypes.BOOL
-        api.CredFree.argtypes = [wintypes.LPVOID]
-        api.CredFree.restype = None
-        return api
-
     def get_secret(self) -> str | None:
-        api = self._api()
-        pointer = ctypes.POINTER(_CREDENTIALW)()
+        api, credential_type = _windows_api()
+        pointer = ctypes.POINTER(credential_type)()
         if not api.CredReadW(
             self.target_name,
             self._CRED_TYPE_GENERIC,
@@ -94,16 +100,16 @@ class WindowsCredentialStore:
     def set_secret(self, secret: str) -> None:
         if not secret:
             raise ValueError("secret cannot be empty")
-        api = self._api()
+        api, credential_type = _windows_api()
         encoded = secret.encode("utf-16-le")
         blob = ctypes.create_string_buffer(encoded)
-        credential = _CREDENTIALW()
+        credential = credential_type()
         credential.Type = self._CRED_TYPE_GENERIC
         credential.TargetName = self.target_name
         credential.CredentialBlobSize = len(encoded)
         credential.CredentialBlob = ctypes.cast(
             blob,
-            ctypes.POINTER(wintypes.BYTE),
+            ctypes.POINTER(ctypes.c_byte),
         )
         credential.Persist = self._CRED_PERSIST_LOCAL_MACHINE
         credential.UserName = self.username
@@ -111,7 +117,7 @@ class WindowsCredentialStore:
             raise ctypes.WinError(ctypes.get_last_error())
 
     def delete_secret(self) -> None:
-        api = self._api()
+        api, _ = _windows_api()
         if not api.CredDeleteW(
             self.target_name,
             self._CRED_TYPE_GENERIC,
@@ -120,3 +126,29 @@ class WindowsCredentialStore:
             error = ctypes.get_last_error()
             if error != self._ERROR_NOT_FOUND:
                 raise ctypes.WinError(error)
+
+
+def resolve_api_hash(
+    env_name: str,
+    store: CredentialStore | None = None,
+) -> str:
+    """Find the Telegram api_hash wherever the user happened to put it.
+
+    The GUI writes it to Windows Credential Manager and the CLI has always
+    read an environment variable; both entry points go through here so a
+    secret saved in one is usable from the other. The variable wins, which
+    keeps an explicit override working on machines without the vault.
+    """
+    from_environment = os.environ.get(env_name, "").strip()
+    if from_environment:
+        return from_environment
+    if store is None and os.name == "nt":
+        store = WindowsCredentialStore()
+    if store is not None:
+        secret = (store.get_secret() or "").strip()
+        if secret:
+            return secret
+    raise ValueError(
+        "Telegram API hash не знайдено: збережіть його у Windows Credential "
+        f"Manager або задайте змінну середовища {env_name}"
+    )

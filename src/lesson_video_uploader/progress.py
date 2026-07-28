@@ -1,66 +1,39 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 
+class LessonUploadProgress:
+    """Turn Telethon's per-file byte counts into progress across one lesson.
 
-@dataclass(frozen=True, slots=True)
-class ProgressSnapshot:
-    student_name: str
-    video_number: int
-    video_count: int
-    file_percent: int
-    total_percent: int
+    Telethon reports ``(sent, total)`` for each file separately, so a bare
+    percentage restarts at zero for every video: a ten-video album walks the
+    bar from 0 to 100 ten times. File sizes are known before the upload
+    starts, which is enough to place each per-file report inside the lesson.
+    """
 
-    def render(self) -> str:
-        return (
-            f"Надсилання уроку: {self.student_name}\n"
-            f"Відео: {self.video_number} з {self.video_count}\n"
-            f"Загальний прогрес: {self.total_percent}%"
-        )
-
-
-class AlbumProgress:
-    def __init__(
-        self,
-        *,
-        student_name: str,
-        video_paths: tuple[Path, ...],
-        video_sizes: tuple[int, ...],
-    ) -> None:
-        if len(video_paths) != len(video_sizes):
-            raise ValueError("each video must have one size")
-        if not video_paths:
+    def __init__(self, video_sizes: tuple[int, ...]) -> None:
+        if not video_sizes:
             raise ValueError("at least one video is required")
         if any(size <= 0 for size in video_sizes):
             raise ValueError("video size must be positive")
-        self.student_name = student_name
-        self.video_paths = video_paths
         self.video_sizes = video_sizes
-        self._file_index = 0
+        self.total_bytes = sum(video_sizes)
+        self._completed_bytes = 0
 
-    def start_file(self, file_index: int) -> None:
-        if not 0 <= file_index < len(self.video_paths):
-            raise IndexError("file index is outside the album")
-        self._file_index = file_index
+    def observe(self, current: int, total: int) -> tuple[int, int]:
+        """Report one Telethon callback and return lesson-wide byte counts.
 
-    def update(self, current: int, total: int) -> ProgressSnapshot:
+        A file is treated as finished once it reports its own total, which is
+        what advances the baseline. Equal-sized videos therefore stay
+        distinguishable, unlike any scheme based on watching the counter
+        reset.
+        """
         if total <= 0:
             raise ValueError("progress total must be positive")
-        bounded_current = min(max(current, 0), total)
-        completed_bytes = sum(self.video_sizes[:self._file_index])
-        scaled_current = round(
-            bounded_current / total * self.video_sizes[self._file_index]
-        )
-        total_bytes = sum(self.video_sizes)
-        return ProgressSnapshot(
-            student_name=self.student_name,
-            video_number=self._file_index + 1,
-            video_count=len(self.video_paths),
-            file_percent=int(bounded_current * 100 / total),
-            total_percent=int((completed_bytes + scaled_current) * 100 / total_bytes),
-        )
-
-    def completion_message(self) -> str:
-        count = len(self.video_paths)
-        return f"Надіслано {count} відео одним альбомом."
+        sent = min(max(current, 0), total)
+        position = min(self._completed_bytes + sent, self.total_bytes)
+        if sent >= total:
+            self._completed_bytes = min(
+                self._completed_bytes + total,
+                self.total_bytes,
+            )
+        return position, self.total_bytes

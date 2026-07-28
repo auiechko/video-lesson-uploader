@@ -16,11 +16,18 @@ class SendStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class LessonVideo:
-    calendar_event_id: str
-    event_start: datetime
-    path: Path
-    order: int
+class LessonDetails:
+    """The fields a generated caption was built from.
+
+    Kept beside the finished caption so a saved batch can be reopened in the
+    editor, and so a preview can name the student without re-parsing text.
+    """
+
+    student_id: str
+    student_name: str
+    lesson_label: str
+    duration_hours: int = 1
+    is_trial: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +54,7 @@ class Lesson:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     sent_at: datetime | None = None
     album_deliveries: tuple[AlbumDelivery, ...] = ()
+    details: LessonDetails | None = None
 
     def __post_init__(self) -> None:
         if not self.profile_id.strip():

@@ -5,9 +5,9 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import AppConfig, load_config, save_config
-from .credentials import CredentialStore
+from .credentials import CredentialStore, resolve_api_hash
 from .manifest import UploadManifest
-from .models import Lesson
+from .models import Lesson, LessonDetails
 from .planning import build_caption
 
 
@@ -85,12 +85,10 @@ class DesktopSettingsController:
         )
 
     def require_api_hash(self) -> str:
-        secret = self.credential_store.get_secret()
-        if not secret:
-            raise ValueError(
-                "Telegram API hash ще не збережений у Windows Credential Manager"
-            )
-        return secret
+        return resolve_api_hash(
+            self.load().config.api_hash_env,
+            self.credential_store,
+        )
 
 
 def parse_target_peer(value: str) -> int | str:
@@ -144,6 +142,34 @@ def create_lesson_from_form(
             is_trial=form.is_trial,
         ),
         ordered_video_paths=form.video_paths,
+        details=LessonDetails(
+            student_id=form.student_id.strip(),
+            student_name=form.student_name.strip(),
+            lesson_label=form.lesson_label.strip(),
+            duration_hours=form.duration_hours,
+            is_trial=form.is_trial,
+        ),
+    )
+
+
+def form_from_lesson(lesson: Lesson) -> LessonForm:
+    """Turn a lesson back into editor fields.
+
+    A batch written by hand may carry only a caption, with nothing to fill the
+    student fields from. Those come back empty rather than guessed, so the
+    caption is retyped deliberately instead of silently rebuilt from parsed
+    fragments.
+    """
+    details = lesson.details
+    return LessonForm(
+        calendar_event_id=lesson.calendar_event_id,
+        event_start=lesson.event_start.strftime("%Y-%m-%d %H:%M"),
+        student_id=details.student_id if details else "",
+        student_name=details.student_name if details else "",
+        lesson_label=details.lesson_label if details else "",
+        duration_hours=details.duration_hours if details else 1,
+        is_trial=details.is_trial if details else False,
+        video_paths=lesson.ordered_video_paths,
     )
 
 
