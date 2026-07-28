@@ -5,7 +5,6 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from lesson_video_uploader.models import Lesson
 from lesson_video_uploader.desktop_controller import (
     DesktopSettingsController,
     LessonForm,
@@ -14,6 +13,7 @@ from lesson_video_uploader.desktop_controller import (
     form_from_lesson,
     parse_target_peer,
 )
+from lesson_video_uploader.models import Lesson
 
 
 class FakeCredentialStore:

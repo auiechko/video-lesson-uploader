@@ -5,7 +5,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-
 _PROFILE_ID_PATTERN = re.compile(r"^[\w.-]+$")
 
 
@@ -35,14 +34,14 @@ def create_telegram_client(
     client_factory: Callable[..., Any],
     *,
     profile_id: str,
-    api_id: object,
-    api_hash: object,
+    api_id: int | str | None,
+    api_hash: str,
     base_dir: Path | None = None,
 ) -> Any:
-    if isinstance(api_id, bool):
+    if api_id is None or isinstance(api_id, bool):
         raise ValueError("Telegram API ID має бути додатним цілим числом")
     try:
-        normalized_api_id = int(api_id)  # type: ignore[arg-type]
+        normalized_api_id = int(api_id)
     except (TypeError, ValueError) as error:
         raise ValueError(
             "Telegram API ID має бути додатним цілим числом"

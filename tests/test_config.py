@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 
 from lesson_video_uploader.config import (
-    AppConfig,
     DEFAULT_ALBUM_BATCH_TEMPLATE,
+    AppConfig,
     load_config,
     save_config,
 )

@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from lesson_video_uploader.calendar_rules import CalendarEventStatus
 from lesson_video_uploader.desktop_controller import create_lesson_from_form

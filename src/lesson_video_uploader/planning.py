@@ -6,7 +6,6 @@ from pathlib import Path
 
 from .models import Lesson, LessonSendMode
 
-
 TELEGRAM_ALBUM_LIMIT = 10
 DEFAULT_ALBUM_BATCH_TEMPLATE = " (альбом {album_number}/{album_count})"
 

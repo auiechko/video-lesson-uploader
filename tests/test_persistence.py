@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
-import sqlite3
 from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -60,7 +60,7 @@ class PersistenceTests(unittest.TestCase):
                         """
                     )
 
-            repository = SQLiteSendItemRepository(path)
+            _repository = SQLiteSendItemRepository(path)
             with closing(sqlite3.connect(path)) as connection:
                 columns = {
                     row[1]

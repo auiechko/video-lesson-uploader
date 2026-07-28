@@ -11,7 +11,6 @@ from lesson_video_uploader.planning import (
     plan_albums,
 )
 
-
 EVENT_START = datetime(2026, 6, 12, 10, 0)
 BASE_CAPTION = "12.06.2026 105813989 Ільяс 10р індив"
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import threading
 import tkinter as tk
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime
+from functools import partial
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -44,7 +46,6 @@ from .telegram_desktop import (
     TelegramDesktopService,
     telethon_components,
 )
-
 
 APP_TITLE = "Lesson Video Uploader"
 
@@ -218,7 +219,10 @@ class DesktopApplication:
         )
         self.log.pack(fill=tk.X, pady=(10, 0))
 
-    def _build_lesson_editor(self, parent: ttk.Frame) -> None:
+    def _build_lesson_editor(
+        self,
+        parent: ttk.Frame | ttk.LabelFrame,
+    ) -> None:
         self._labeled_entry(
             parent, "Calendar event ID", self.event_id_var, 0, 0, columnspan=3
         )
@@ -290,7 +294,10 @@ class DesktopApplication:
         parent.columnconfigure(3, weight=1)
         parent.rowconfigure(6, weight=1)
 
-    def _build_preview(self, parent: ttk.Frame) -> None:
+    def _build_preview(
+        self,
+        parent: ttk.Frame | ttk.LabelFrame,
+    ) -> None:
         columns = ("date", "caption", "videos", "telegram")
         self.lesson_tree = ttk.Treeview(
             parent,
@@ -516,7 +523,7 @@ class DesktopApplication:
 
     @staticmethod
     def _labeled_entry(
-        parent: ttk.Frame,
+        parent: ttk.Frame | ttk.LabelFrame,
         label: str,
         variable: tk.StringVar,
         row: int,
@@ -529,7 +536,12 @@ class DesktopApplication:
         ttk.Label(parent, text=label).grid(
             row=row, column=column, sticky=tk.W, padx=(0, 6), pady=5
         )
-        entry = ttk.Entry(parent, textvariable=variable, width=width, show=show)
+        entry = ttk.Entry(
+            parent,
+            textvariable=variable,
+            width=width,
+            show=show or "",
+        )
         entry.grid(
             row=row,
             column=column + 1,
@@ -655,7 +667,7 @@ class DesktopApplication:
         try:
             date_from = date.fromisoformat(self.google_from_var.get().strip())
             date_to = date.fromisoformat(self.google_to_var.get().strip())
-        except ValueError as error:
+        except ValueError:
             self._show_error(
                 ValueError("Дати мають формат РРРР-ММ-ДД")
             )
@@ -1188,7 +1200,7 @@ class DesktopApplication:
             self.root.after(0, lambda: self.progress_var.set(percent))
 
         def status(text: str) -> None:
-            self.root.after(0, lambda value=text: self._log(value))
+            self.root.after(0, partial(self._log, text))
 
         async def calendar_revalidator(
             snapshots: Mapping[str, CalendarEventSnapshot],
@@ -1261,7 +1273,7 @@ class DesktopApplication:
             return
 
         def status(text: str) -> None:
-            self.root.after(0, lambda value=text: self._log(value))
+            self.root.after(0, partial(self._log, text))
 
         self._run_async(
             service.reconcile_manifest(
@@ -1286,7 +1298,7 @@ class DesktopApplication:
     def _run_async(
         self,
         coroutine: Coroutine[Any, Any, Any],
-        on_success,
+        on_success: Callable[[Any], object],
         busy_text: str,
     ) -> None:
         if self.busy:
@@ -1301,19 +1313,21 @@ class DesktopApplication:
             except Exception as error:
                 self.root.after(
                     0,
-                    lambda captured=error: self._background_error(captured),
+                    partial(self._background_error, error),
                 )
             else:
                 self.root.after(
                     0,
-                    lambda captured=result: self._background_success(
-                        on_success, captured
-                    ),
+                    partial(self._background_success, on_success, result),
                 )
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _background_success(self, callback, result: Any) -> None:
+    def _background_success(
+        self,
+        callback: Callable[[Any], object],
+        result: Any,
+    ) -> None:
         self._set_busy(False, "Готово")
         callback(result)
 

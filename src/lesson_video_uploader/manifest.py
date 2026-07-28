@@ -179,10 +179,12 @@ def load_manifest(path: Path) -> UploadManifest:
             is_trial=is_trial,
             required=explicit_caption is None,
         )
-        caption = (
-            explicit_caption.strip()
-            if isinstance(explicit_caption, str)
-            else build_caption(
+        if isinstance(explicit_caption, str):
+            caption = explicit_caption.strip()
+        else:
+            if details is None:
+                raise ValueError("lesson details are required without caption")
+            caption = build_caption(
                 date=event_start.date(),
                 student_id=details.student_id,
                 student_name=details.student_name,
@@ -190,7 +192,6 @@ def load_manifest(path: Path) -> UploadManifest:
                 duration_hours=duration_hours,
                 is_trial=is_trial,
             )
-        )
         lessons.append(Lesson(
             profile_id=profile_id,
             batch_id=batch_id,

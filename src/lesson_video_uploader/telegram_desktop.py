@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from .calendar_rules import (
     BatchRevalidationRequired,
