@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+htmlcov/
+.venv/
+venv/
+.lesson-video-uploader/
+*.session
+*.session-journal
+config.toml
+.env
+batch*.json
+!manifest.example.json
