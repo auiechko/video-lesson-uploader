@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from .models import Lesson
+from .models import Lesson, LessonSendMode
 
 
 TELEGRAM_ALBUM_LIMIT = 10
@@ -91,6 +91,14 @@ def _preview_name(lesson: Lesson) -> str:
 
 def build_preview(lesson: Lesson) -> PreviewRow:
     student_name = _preview_name(lesson)
+    if lesson.send_mode is LessonSendMode.TEXT_ONLY:
+        return PreviewRow(
+            summary=(
+                f"{lesson.event_start:%d.%m.%Y} | {student_name} | "
+                "текстове повідомлення без відео"
+            ),
+            video_paths=(),
+        )
     album_count = (lesson.video_count + TELEGRAM_ALBUM_LIMIT - 1) // TELEGRAM_ALBUM_LIMIT
     album_label = (
         "Один Telegram-альбом"

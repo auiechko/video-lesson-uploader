@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from .models import AlbumDelivery, Lesson, SendStatus
+from .models import AlbumDelivery, Lesson, LessonSendMode, SendStatus
 from .persistence import SQLiteSendItemRepository
 from .planning import DEFAULT_ALBUM_BATCH_TEMPLATE, AlbumPlan, plan_albums
 
@@ -49,6 +49,8 @@ class TelegramDeliveryReconciler:
         messages = list(
             await self.client.get_messages(target_peer, limit=message_limit)
         )
+        if current.send_mode is LessonSendMode.TEXT_ONLY:
+            return self._reconcile_text_only(current, messages)
         groups = self._group_messages(messages)
         plans = plan_albums(
             current,
@@ -125,6 +127,42 @@ class TelegramDeliveryReconciler:
             telegram_album_group_id=None,
             telegram_message_ids=(),
             album_deliveries=(),
+            status=SendStatus.DELIVERY_UNKNOWN,
+        )
+        self.repository.save(unknown)
+        return unknown
+
+    def _reconcile_text_only(
+        self,
+        lesson: Lesson,
+        messages: list[Any],
+    ) -> Lesson:
+        matches = []
+        for message in messages:
+            message_id = getattr(message, "id", None)
+            text = getattr(message, "message", "")
+            sent_at = getattr(message, "date", None)
+            if (
+                isinstance(message_id, int)
+                and isinstance(text, str)
+                and text.strip() == lesson.caption
+                and isinstance(sent_at, datetime)
+                and abs(sent_at - lesson.created_at) <= self.time_tolerance
+            ):
+                matches.append(message)
+        if len(matches) == 1:
+            message = matches[0]
+            sent = replace(
+                lesson,
+                telegram_message_ids=(message.id,),
+                status=SendStatus.SENT,
+                sent_at=message.date,
+            )
+            self.repository.save(sent)
+            return sent
+        unknown = replace(
+            lesson,
+            telegram_message_ids=(),
             status=SendStatus.DELIVERY_UNKNOWN,
         )
         self.repository.save(unknown)

@@ -5,7 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-from .models import AlbumDelivery, Lesson, SendStatus
+from .models import AlbumDelivery, Lesson, LessonSendMode, SendStatus
 from .persistence import SQLiteSendItemRepository
 from .planning import DEFAULT_ALBUM_BATCH_TEMPLATE, plan_albums
 from .progress import LessonUploadProgress
@@ -17,6 +17,7 @@ class ManualReviewRequired(RuntimeError):
 
 class TelethonClient(Protocol):
     async def send_file(self, **kwargs: Any) -> Any: ...
+    async def send_message(self, **kwargs: Any) -> Any: ...
 
 
 ProgressCallback = Callable[[int, int], object]
@@ -85,6 +86,9 @@ class TelethonLessonSender:
                 raise ManualReviewRequired(
                     "A previous upload was interrupted; verify Telegram manually."
                 )
+
+        if lesson.send_mode is LessonSendMode.TEXT_ONLY:
+            return await self._send_text_only(lesson, target_peer=target_peer)
 
         plans = plan_albums(
             lesson,
@@ -161,6 +165,43 @@ class TelethonLessonSender:
             ),
             telegram_message_ids=tuple(message_ids),
             album_deliveries=tuple(deliveries),
+            status=SendStatus.SENT,
+            sent_at=datetime.now(timezone.utc),
+        )
+        self.repository.save(sent)
+        return sent
+
+    async def _send_text_only(
+        self,
+        lesson: Lesson,
+        *,
+        target_peer: object,
+    ) -> Lesson:
+        self.repository.save(replace(lesson, status=SendStatus.UPLOADING))
+        try:
+            response = await self.client.send_message(
+                entity=target_peer,
+                message=lesson.caption,
+            )
+            message_id = getattr(response, "id", None)
+            if not isinstance(message_id, int):
+                return self._save_unconfirmed(
+                    lesson,
+                    message_ids=[],
+                    deliveries=[],
+                )
+        except Exception as error:
+            self._save_unconfirmed(
+                lesson,
+                message_ids=[],
+                deliveries=[],
+            )
+            raise ManualReviewRequired(
+                "Telegram delivery is unknown; inspect recent messages before retrying."
+            ) from error
+        sent = replace(
+            lesson,
+            telegram_message_ids=(message_id,),
             status=SendStatus.SENT,
             sent_at=datetime.now(timezone.utc),
         )

@@ -8,12 +8,51 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from lesson_video_uploader.models import Lesson, SendStatus
+from lesson_video_uploader.models import Lesson, LessonSendMode, SendStatus
 from lesson_video_uploader.persistence import SQLiteSendItemRepository
 from lesson_video_uploader.reconciliation import TelegramDeliveryReconciler
 
 
 class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_text_only_message_is_reconciled_by_exact_caption(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteSendItemRepository(
+                Path(directory) / "deliveries.sqlite3"
+            )
+            lesson = Lesson(
+                profile_id="main",
+                batch_id="batch",
+                calendar_event_id="text-event",
+                event_start=datetime(2026, 6, 12, 10),
+                caption=(
+                    "12.06.2026 105813989 Ільяс "
+                    "10р індив (без запису)"
+                ),
+                ordered_video_paths=(),
+                send_mode=LessonSendMode.TEXT_ONLY,
+                status=SendStatus.DELIVERY_UNKNOWN,
+            )
+            repository.save(lesson)
+            message = SimpleNamespace(
+                id=501,
+                grouped_id=None,
+                message=lesson.caption,
+                date=datetime.now(timezone.utc),
+                file=None,
+            )
+            client = SimpleNamespace(
+                get_messages=AsyncMock(return_value=[message])
+            )
+            reconciler = TelegramDeliveryReconciler(client, repository)
+
+            result = await reconciler.reconcile(
+                lesson,
+                target_peer="group",
+            )
+
+        self.assertEqual(result.status, SendStatus.SENT)
+        self.assertEqual(result.telegram_message_ids, (501,))
+
     async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
