@@ -3,13 +3,21 @@ from __future__ import annotations
 import asyncio
 import threading
 import tkinter as tk
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
-from typing import Any, Coroutine
+from typing import Any, Coroutine, Mapping
 
 from .credentials import WindowsCredentialStore
+from .calendar_rules import (
+    BatchRevalidationRequired,
+    CalendarEventSnapshot,
+    parse_calendar_event,
+    resolve_calendar_slots,
+    validate_calendar_snapshots,
+)
 from .desktop_controller import (
     DesktopSettingsController,
     LessonForm,
@@ -18,6 +26,7 @@ from .desktop_controller import (
     form_from_lesson,
 )
 from .google_calendar import (
+    CalendarEventNotSendable,
     GoogleCalendarEvent,
     GoogleCalendarInfo,
     GoogleCalendarService,
@@ -25,7 +34,8 @@ from .google_calendar import (
     calendar_event_to_lesson_form,
 )
 from .manifest import UploadManifest, load_manifest, save_manifest
-from .models import Lesson, SendStatus
+from .models import Lesson, LessonSendMode, SendStatus
+from .persistence import SQLiteSendItemRepository
 from .planning import plan_albums
 from .telegram_desktop import (
     LoginResult,
@@ -50,6 +60,9 @@ class DesktopApplication:
             self.config_path,
             WindowsCredentialStore(),
         )
+        self.calendar_report_repository = SQLiteSendItemRepository(
+            self.database_path
+        )
         self.google_token_store = WindowsCredentialStore(
             target_name="lesson-video-uploader/google-calendar-oauth",
             username="google-calendar",
@@ -57,6 +70,7 @@ class DesktopApplication:
         self.google_service: GoogleCalendarService | None = None
         self.google_events: list[GoogleCalendarEvent] = []
         self.google_calendar_by_label: dict[str, GoogleCalendarInfo] = {}
+        self.pending_calendar_form: LessonForm | None = None
         self.lessons: list[Lesson] = []
         self.pending_video_paths: list[Path] = []
         self.busy = False
@@ -94,6 +108,7 @@ class DesktopApplication:
         self.lesson_label_var = tk.StringVar(value="10р індив")
         self.duration_var = tk.StringVar(value="1")
         self.trial_var = tk.BooleanVar(value=False)
+        self.no_recording_var = tk.BooleanVar(value=False)
         self.api_id_var = tk.StringVar()
         self.api_hash_var = tk.StringVar()
         self.phone_var = tk.StringVar()
@@ -231,6 +246,11 @@ class DesktopApplication:
             text="Пробне заняття",
             variable=self.trial_var,
         ).grid(row=4, column=2, sticky=tk.W, padx=(10, 0))
+        ttk.Checkbutton(
+            parent,
+            text="Без запису",
+            variable=self.no_recording_var,
+        ).grid(row=4, column=3, sticky=tk.W, padx=(10, 0))
 
         ttk.Label(parent, text="MP4 у хронологічному порядку").grid(
             row=5, column=0, columnspan=4, sticky=tk.W, pady=(10, 4)
@@ -388,7 +408,7 @@ class DesktopApplication:
         filters.columnconfigure(1, weight=1)
         filters.columnconfigure(3, weight=1)
 
-        columns = ("start", "duration", "summary", "event_id")
+        columns = ("start", "duration", "status", "summary", "event_id")
         self.google_event_tree = ttk.Treeview(
             parent,
             columns=columns,
@@ -398,6 +418,7 @@ class DesktopApplication:
         )
         self.google_event_tree.heading("start", text="Початок")
         self.google_event_tree.heading("duration", text="Год.")
+        self.google_event_tree.heading("status", text="Статус")
         self.google_event_tree.heading("summary", text="Назва події")
         self.google_event_tree.heading("event_id", text="Google event ID")
         self.google_event_tree.column("start", width=135, stretch=False)
@@ -407,8 +428,9 @@ class DesktopApplication:
             anchor=tk.CENTER,
             stretch=False,
         )
-        self.google_event_tree.column("summary", width=430)
-        self.google_event_tree.column("event_id", width=230)
+        self.google_event_tree.column("status", width=190, stretch=False)
+        self.google_event_tree.column("summary", width=360)
+        self.google_event_tree.column("event_id", width=180)
         self.google_event_tree.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
         self.google_event_tree.bind(
             "<Double-1>",
@@ -663,14 +685,47 @@ class DesktopApplication:
     ) -> None:
         self.google_events = list(events)
         self.google_event_tree.delete(*self.google_event_tree.get_children())
-        for index, event in enumerate(events):
+        timezone_name = self.google_timezone_var.get().strip()
+        parsed_events = [
+            parse_calendar_event(event, timezone_name=timezone_name)
+            for event in events
+        ]
+        for parsed in parsed_events:
+            self.calendar_report_repository.save_calendar_event_report(parsed)
+        manual_event_ids = {
+            candidate.event_id
+            for slot in resolve_calendar_slots(
+                parsed_events,
+                tolerance_minutes=(
+                    self.settings.load().config
+                    .calendar_conflict_tolerance_minutes
+                ),
+            )
+            if slot.status is not None
+            and slot.status.value == "MANUAL_SELECTION_REQUIRED"
+            for candidate in slot.candidates
+        }
+        for index, (event, parsed) in enumerate(
+            zip(events, parsed_events, strict=True)
+        ):
+            display_status = (
+                "MANUAL_SELECTION_REQUIRED"
+                if event.id in manual_event_ids
+                else (
+                    f"{parsed.status.value} / "
+                    f"{parsed.cancellation_source.value}"
+                    if parsed.cancellation_source is not None
+                    else parsed.status.value
+                )
+            )
             self.google_event_tree.insert(
                 "",
                 tk.END,
                 iid=str(index),
                 values=(
-                    event.start.strftime("%d.%m.%Y %H:%M"),
-                    event.duration_hours,
+                    parsed.start.strftime("%d.%m.%Y %H:%M"),
+                    parsed.duration_hours,
+                    display_status,
                     event.summary,
                     event.id,
                 ),
@@ -684,7 +739,15 @@ class DesktopApplication:
             self._show_error(ValueError("Виберіть подію календаря."))
             return
         event = self.google_events[int(selection[0])]
-        form = calendar_event_to_lesson_form(event)
+        try:
+            form = calendar_event_to_lesson_form(
+                event,
+                timezone_name=self.google_timezone_var.get().strip(),
+            )
+        except CalendarEventNotSendable as error:
+            self._show_error(error)
+            return
+        self.pending_calendar_form = form
         self.event_id_var.set(form.calendar_event_id)
         self.start_var.set(form.event_start)
         self.student_id_var.set(form.student_id)
@@ -692,10 +755,18 @@ class DesktopApplication:
         self.lesson_label_var.set(form.lesson_label)
         self.duration_var.set(str(form.duration_hours))
         self.trial_var.set(form.is_trial)
+        self.no_recording_var.set(form.is_no_recording)
+        if form.is_no_recording:
+            self.pending_video_paths.clear()
+            self._refresh_pending_files()
         self.notebook.select(self.send_tab)
         self._log(
-            "Імпортовано подію Google Calendar. "
-            "Перевірте поля уроку та додайте MP4."
+            f"Імпортовано {form.calendar_status}. "
+            + (
+                "Це text-only урок; MP4 не потрібні."
+                if form.is_no_recording
+                else "Додайте MP4."
+            )
         )
 
     def _disconnect_google_calendar(self) -> None:
@@ -736,6 +807,11 @@ class DesktopApplication:
         return True
 
     def _pick_videos(self) -> None:
+        if self.no_recording_var.get():
+            self._show_error(
+                ValueError("Для уроку «без запису» MP4 не додаються.")
+            )
+            return
         selected = filedialog.askopenfilenames(
             title="Виберіть MP4 одного уроку в правильному порядку",
             filetypes=[("MP4 відео", "*.mp4")],
@@ -774,10 +850,55 @@ class DesktopApplication:
 
     def _add_lesson(self) -> None:
         try:
-            lesson = create_lesson_from_form(
-                profile_id=self.profile_var.get(),
-                batch_id=self.batch_var.get(),
-                form=LessonForm(
+            calendar_form = (
+                self.pending_calendar_form
+                if (
+                    self.pending_calendar_form is not None
+                    and self.pending_calendar_form.calendar_event_id
+                    == self.event_id_var.get().strip()
+                )
+                else None
+            )
+            if calendar_form is not None:
+                current_values = {
+                    "start": datetime.fromisoformat(self.start_var.get().strip()),
+                    "student_id": self.student_id_var.get().strip(),
+                    "student_name": self.student_name_var.get().strip(),
+                    "lesson_label": self.lesson_label_var.get().strip(),
+                    "duration": int(self.duration_var.get()),
+                    "trial": self.trial_var.get(),
+                    "no_recording": self.no_recording_var.get(),
+                }
+                expected_values = {
+                    "start": datetime.fromisoformat(calendar_form.event_start),
+                    "student_id": calendar_form.student_id,
+                    "student_name": calendar_form.student_name,
+                    "lesson_label": calendar_form.lesson_label,
+                    "duration": calendar_form.duration_hours,
+                    "trial": calendar_form.is_trial,
+                    "no_recording": calendar_form.is_no_recording,
+                }
+                changed = [
+                    name
+                    for name, value in current_values.items()
+                    if value != expected_values[name]
+                ]
+                if changed:
+                    raise ValueError(
+                        "Дані Calendar змінено у формі: "
+                        + ", ".join(changed)
+                        + ". Виправте подію в Google Calendar та імпортуйте її знову."
+                    )
+                form = replace(
+                    calendar_form,
+                    video_paths=(
+                        ()
+                        if calendar_form.is_no_recording
+                        else tuple(self.pending_video_paths)
+                    ),
+                )
+            else:
+                form = LessonForm(
                     calendar_event_id=self.event_id_var.get(),
                     event_start=self.start_var.get(),
                     student_id=self.student_id_var.get(),
@@ -786,7 +907,12 @@ class DesktopApplication:
                     duration_hours=int(self.duration_var.get()),
                     is_trial=self.trial_var.get(),
                     video_paths=tuple(self.pending_video_paths),
-                ),
+                    is_no_recording=self.no_recording_var.get(),
+                )
+            lesson = create_lesson_from_form(
+                profile_id=self.profile_var.get(),
+                batch_id=self.batch_var.get(),
+                form=form,
             )
             if any(
                 item.calendar_event_id == lesson.calendar_event_id
@@ -800,6 +926,8 @@ class DesktopApplication:
         self.lessons.sort(key=lambda item: (item.event_start, item.calendar_event_id))
         self._refresh_lessons()
         self.pending_video_paths.clear()
+        self.pending_calendar_form = None
+        self.no_recording_var.set(False)
         self._refresh_pending_files()
         self.event_id_var.set(f"event-{datetime.now():%Y%m%d-%H%M%S}")
         self._log(f"Додано урок: {lesson.caption}")
@@ -807,16 +935,19 @@ class DesktopApplication:
     def _refresh_lessons(self) -> None:
         self.lesson_tree.delete(*self.lesson_tree.get_children())
         for index, lesson in enumerate(self.lessons):
-            plans = plan_albums(lesson)
-            telegram_label = (
-                "1 повідомлення"
-                if lesson.video_count == 1
-                else (
-                    "1 альбом"
-                    if len(plans) == 1
-                    else f"{len(plans)} альбоми"
+            if lesson.send_mode is LessonSendMode.TEXT_ONLY:
+                telegram_label = "текст"
+            else:
+                plans = plan_albums(lesson)
+                telegram_label = (
+                    "1 повідомлення"
+                    if lesson.video_count == 1
+                    else (
+                        "1 альбом"
+                        if len(plans) == 1
+                        else f"{len(plans)} альбоми"
+                    )
                 )
-            )
             self.lesson_tree.insert(
                 "",
                 tk.END,
@@ -861,6 +992,10 @@ class DesktopApplication:
         self.lesson_label_var.set(form.lesson_label)
         self.duration_var.set(str(form.duration_hours))
         self.trial_var.set(form.is_trial)
+        self.no_recording_var.set(form.is_no_recording)
+        self.pending_calendar_form = (
+            form if form.calendar_snapshot is not None else None
+        )
         self.pending_video_paths = list(form.video_paths)
         self._refresh_pending_files()
         self._refresh_lessons()
@@ -1037,6 +1172,45 @@ class DesktopApplication:
         def status(text: str) -> None:
             self.root.after(0, lambda value=text: self._log(value))
 
+        async def calendar_revalidator(
+            snapshots: Mapping[str, CalendarEventSnapshot],
+        ) -> None:
+            if self.google_service is None:
+                raise BatchRevalidationRequired({
+                    event_id: {
+                        "connection": (
+                            "Google Calendar connected",
+                            "Google Calendar disconnected",
+                        )
+                    }
+                    for event_id in snapshots
+                })
+            current = {}
+            missing_changes = {}
+            for event_id, snapshot in snapshots.items():
+                try:
+                    raw_event = await asyncio.to_thread(
+                        self.google_service.get_event,
+                        calendar_id=snapshot.calendar_id,
+                        event_id=event_id,
+                        timezone_name=config.google_timezone,
+                    )
+                except Exception as error:
+                    missing_changes[event_id] = {
+                        "event": (snapshot.summary, str(error))
+                    }
+                    continue
+                current[event_id] = parse_calendar_event(
+                    raw_event,
+                    timezone_name=config.google_timezone,
+                )
+                self.calendar_report_repository.save_calendar_event_report(
+                    current[event_id]
+                )
+            if missing_changes:
+                raise BatchRevalidationRequired(missing_changes)
+            validate_calendar_snapshots(snapshots, current)
+
         self._run_async(
             service.send_manifest(
                 manifest,
@@ -1045,6 +1219,7 @@ class DesktopApplication:
                 target_peer=manifest.target_peer,
                 status_callback=status,
                 progress_callback=progress,
+                calendar_revalidator=calendar_revalidator,
             ),
             self._send_success,
             "Надсилання уроків…",
@@ -1056,7 +1231,8 @@ class DesktopApplication:
         self._log(f"Готово. Підтверджено {count} Telegram message IDs.")
         messagebox.showinfo(
             APP_TITLE,
-            f"Успішно надіслано {len(results)} урок(и), {count} відео.",
+            f"Успішно надіслано {len(results)} урок(и), "
+            f"{count} Telegram-повідомлень.",
         )
 
     def _reconcile_package(self) -> None:
