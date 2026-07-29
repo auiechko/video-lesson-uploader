@@ -1108,7 +1108,12 @@ class DesktopApplication:
             yscrollcommand=google_y_scroll.set,
         )
         self.google_event_tree.grid(row=0, column=0, sticky=tk.NSEW)
-        google_y_scroll.grid(row=0, column=1, sticky=tk.NS)
+        google_y_scroll.grid(
+            row=0,
+            column=1,
+            sticky=tk.NS,
+            padx=(0, 12),
+        )
         google_x_scroll.grid(row=1, column=0, sticky=tk.EW)
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
