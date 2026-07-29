@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import threading
 import tkinter as tk
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from functools import partial
@@ -90,6 +91,23 @@ from .zoom_revalidation import validate_zoom_sources
 APP_TITLE = "Lesson Video Uploader"
 CONTROL_KEY_MASK = 0x0004
 VIRTUAL_KEY_V = 86
+SUCCESS_BACKGROUND = "#dff3e4"
+SUCCESS_FOREGROUND = "#14532d"
+DANGER_BACKGROUND = "#fde2e2"
+DANGER_FOREGROUND = "#991b1b"
+SELECTED_NEUTRAL_BACKGROUND = "#dbeafe"
+SELECTED_NEUTRAL_FOREGROUND = "#172554"
+_TABLE_NUMBER_PATTERN = re.compile(
+    r"^-?\d+(?:[.,]\d+)?(?:\s*хв)?$",
+    re.IGNORECASE,
+)
+_TABLE_DATE_FORMATS = (
+    "%d.%m.%Y %H:%M:%S",
+    "%d.%m.%Y %H:%M",
+    "%d.%m.%Y",
+    "%H:%M:%S",
+    "%H:%M",
+)
 
 
 def _format_seconds(value: float | None) -> str:
@@ -110,6 +128,47 @@ def _parse_offset(value: str) -> float:
     if hours < 0 or not 0 <= minutes < 60 or not 0 <= seconds < 60:
         raise ValueError("Некоректна точка розрізання")
     return float(hours * 3600 + minutes * 60 + seconds)
+
+
+def table_sort_key(value: object) -> tuple[int, float, str]:
+    text = str(value).strip()
+    if not text or text == "—":
+        return 3, 0, ""
+    for date_format in _TABLE_DATE_FORMATS:
+        try:
+            parsed = datetime.strptime(text, date_format)
+        except ValueError:
+            continue
+        sortable_number = (
+            parsed.toordinal() * 86400
+            + parsed.hour * 3600
+            + parsed.minute * 60
+            + parsed.second
+        )
+        return 0, float(sortable_number), ""
+    if _TABLE_NUMBER_PATTERN.fullmatch(text):
+        number = text.casefold().removesuffix("хв").strip()
+        return 1, float(number.replace(",", ".")), ""
+    return 2, 0, text.casefold()
+
+
+def sorted_table_item_ids(
+    rows: Iterable[tuple[str, object]],
+    *,
+    descending: bool = False,
+) -> tuple[str, ...]:
+    materialized = tuple(rows)
+    populated = [
+        row for row in materialized if table_sort_key(row[1])[0] != 3
+    ]
+    blanks = [
+        row for row in materialized if table_sort_key(row[1])[0] == 3
+    ]
+    populated.sort(
+        key=lambda row: table_sort_key(row[1]),
+        reverse=descending,
+    )
+    return tuple(row[0] for row in (*populated, *blanks))
 
 
 def is_ctrl_v_shortcut(*, state: int | str, keycode: int) -> bool:
@@ -188,6 +247,8 @@ class DesktopApplication:
         self.manual_text_event_ids: set[str] = set()
         self.ignored_event_ids: set[str] = set()
         self.google_tree_event_index: dict[str, int] = {}
+        self.tree_sort_state: dict[str, tuple[str, bool]] = {}
+        self.tree_heading_labels: dict[str, dict[str, str]] = {}
         self.busy = False
         self.action_buttons: list[ttk.Button] = []
 
@@ -207,9 +268,100 @@ class DesktopApplication:
         style.configure(".", font=("Segoe UI", 10))
         style.configure("Title.TLabel", font=("Segoe UI Semibold", 20))
         style.configure("Subtitle.TLabel", foreground="#52606d")
+        style.configure("Success.TLabel", foreground=SUCCESS_FOREGROUND)
+        style.configure("Danger.TLabel", foreground=DANGER_FOREGROUND)
         style.configure("Primary.TButton", font=("Segoe UI Semibold", 10))
         style.configure("Treeview", rowheight=30)
         style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10))
+        style.configure("Status.Treeview", rowheight=30)
+
+    def _make_tree_sortable(
+        self,
+        tree: ttk.Treeview,
+        headings: Mapping[str, str],
+    ) -> None:
+        tree_key = str(tree)
+        self.tree_heading_labels[tree_key] = dict(headings)
+        for column, label in headings.items():
+            tree.heading(
+                column,
+                text=label,
+                command=partial(self._sort_treeview, tree, column),
+            )
+
+    def _sort_treeview(
+        self,
+        tree: ttk.Treeview,
+        column: str,
+    ) -> None:
+        tree_key = str(tree)
+        previous = self.tree_sort_state.get(tree_key)
+        descending = bool(
+            previous is not None
+            and previous[0] == column
+            and not previous[1]
+        )
+        self._apply_tree_sort_order(tree, column, descending)
+
+    def _apply_tree_sort_order(
+        self,
+        tree: ttk.Treeview,
+        column: str,
+        descending: bool,
+    ) -> None:
+        tree_key = str(tree)
+        ordered_ids = sorted_table_item_ids(
+            (
+                (item_id, tree.set(item_id, column))
+                for item_id in tree.get_children("")
+            ),
+            descending=descending,
+        )
+        for position, item_id in enumerate(ordered_ids):
+            tree.move(item_id, "", position)
+        self.tree_sort_state[tree_key] = (column, descending)
+        headings = self.tree_heading_labels.get(tree_key, {})
+        for heading_column, label in headings.items():
+            suffix = (
+                " ▼"
+                if heading_column == column and descending
+                else (
+                    " ▲"
+                    if heading_column == column
+                    else ""
+                )
+            )
+            tree.heading(heading_column, text=f"{label}{suffix}")
+
+    def _reapply_tree_sort(self, tree: ttk.Treeview) -> None:
+        previous = self.tree_sort_state.get(str(tree))
+        if previous is not None:
+            self._apply_tree_sort_order(tree, *previous)
+
+    def _update_status_tree_selection_style(
+        self,
+        _event: object = None,
+    ) -> None:
+        selection = self.google_event_tree.selection()
+        tags = (
+            set(self.google_event_tree.item(selection[0], "tags"))
+            if selection
+            else set()
+        )
+        if "unresolved" in tags:
+            background = DANGER_BACKGROUND
+            foreground = DANGER_FOREGROUND
+        elif "resolved" in tags:
+            background = SUCCESS_BACKGROUND
+            foreground = SUCCESS_FOREGROUND
+        else:
+            background = SELECTED_NEUTRAL_BACKGROUND
+            foreground = SELECTED_NEUTRAL_FOREGROUND
+        ttk.Style(self.root).map(
+            "Status.Treeview",
+            background=[("selected", background)],
+            foreground=[("selected", foreground)],
+        )
 
     def _create_variables(self) -> None:
         today = datetime.now().strftime("%Y-%m-%d")
@@ -429,10 +581,15 @@ class DesktopApplication:
             selectmode="browse",
             height=10,
         )
-        self.lesson_tree.heading("date", text="Дата")
-        self.lesson_tree.heading("caption", text="Caption")
-        self.lesson_tree.heading("videos", text="Відео")
-        self.lesson_tree.heading("telegram", text="Telegram")
+        self._make_tree_sortable(
+            self.lesson_tree,
+            {
+                "date": "Дата",
+                "caption": "Caption",
+                "videos": "Відео",
+                "telegram": "Telegram",
+            },
+        )
         self.lesson_tree.column("date", width=86, stretch=False)
         self.lesson_tree.column("caption", width=300)
         self.lesson_tree.column("videos", width=65, anchor=tk.CENTER, stretch=False)
@@ -616,10 +773,11 @@ class DesktopApplication:
             textvariable=self.workflow_step_var,
             style="Subtitle.TLabel",
         ).pack(side=tk.LEFT)
-        ttk.Label(
+        self.unresolved_count_label = ttk.Label(
             workflow,
             textvariable=self.unresolved_count_var,
-        ).pack(side=tk.LEFT, padx=(16, 0))
+        )
+        self.unresolved_count_label.pack(side=tk.LEFT, padx=(16, 0))
         self.preflight_button = ttk.Button(
             workflow,
             text="Перевірити конвертацію",
@@ -665,34 +823,77 @@ class DesktopApplication:
             "student",
             "event_id",
         )
+        tree_frame = ttk.Frame(parent)
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
         self.google_event_tree = ttk.Treeview(
-            parent,
+            tree_frame,
             columns=columns,
             show="headings",
             selectmode="browse",
             height=11,
+            style="Status.Treeview",
         )
-        self.google_event_tree.heading("zoom_start", text="Zoom start")
-        self.google_event_tree.heading("calendar_start", text="Calendar start")
-        self.google_event_tree.heading("calendar_end", text="Calendar end")
-        self.google_event_tree.heading("difference", text="Різниця")
-        self.google_event_tree.heading("video_end", text="Video end")
-        self.google_event_tree.heading("next_event", text="Наступний урок")
-        self.google_event_tree.heading("overlap", text="Overlap")
-        self.google_event_tree.heading("method", text="Метод")
-        self.google_event_tree.heading("status", text="Статус")
-        self.google_event_tree.heading("student", text="Учень")
-        self.google_event_tree.heading("event_id", text="Google event ID")
+        self.google_event_tree.tag_configure(
+            "resolved",
+            background=SUCCESS_BACKGROUND,
+            foreground=SUCCESS_FOREGROUND,
+        )
+        self.google_event_tree.tag_configure(
+            "unresolved",
+            background=DANGER_BACKGROUND,
+            foreground=DANGER_FOREGROUND,
+        )
+        self._make_tree_sortable(
+            self.google_event_tree,
+            {
+                "zoom_start": "Zoom start",
+                "calendar_start": "Calendar start",
+                "calendar_end": "Calendar end",
+                "difference": "Різниця",
+                "video_end": "Video end",
+                "next_event": "Наступний урок",
+                "overlap": "Overlap",
+                "method": "Метод",
+                "status": "Статус",
+                "student": "Учень",
+                "event_id": "Google event ID",
+            },
+        )
         for column in columns:
             self.google_event_tree.column(
                 column,
                 width=125 if column not in {"status", "student"} else 180,
-                stretch=column in {"status", "student"},
+                minwidth=90,
+                stretch=False,
             )
-        self.google_event_tree.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
+        self.google_event_tree.column("event_id", width=230, minwidth=130)
+        google_x_scroll = ttk.Scrollbar(
+            tree_frame,
+            orient=tk.HORIZONTAL,
+            command=self.google_event_tree.xview,
+        )
+        google_y_scroll = ttk.Scrollbar(
+            tree_frame,
+            orient=tk.VERTICAL,
+            command=self.google_event_tree.yview,
+        )
+        self.google_event_tree.configure(
+            xscrollcommand=google_x_scroll.set,
+            yscrollcommand=google_y_scroll.set,
+        )
+        self.google_event_tree.grid(row=0, column=0, sticky=tk.NSEW)
+        google_y_scroll.grid(row=0, column=1, sticky=tk.NS)
+        google_x_scroll.grid(row=1, column=0, sticky=tk.EW)
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
         self.google_event_tree.bind(
             "<Double-1>",
             lambda _event: self._import_google_event(),
+        )
+        self.google_event_tree.bind(
+            "<<TreeviewSelect>>",
+            self._update_status_tree_selection_style,
+            add="+",
         )
         import_button = ttk.Button(
             parent,
@@ -982,9 +1183,32 @@ class DesktopApplication:
                 + len(self.missing_zoom_events)
                 + len(self.zoom_catalog_issues)
             )
+        blocked_state = self.workflow.state in {
+            WorkflowState.PREFLIGHT_BLOCKED,
+            WorkflowState.RESOLUTION_REQUIRED,
+            WorkflowState.BATCH_REVALIDATION_REQUIRED,
+            WorkflowState.SEND_FAILED,
+        }
+        if (
+            self.workflow.state
+            is WorkflowState.BATCH_REVALIDATION_REQUIRED
+            and unresolved_count == 0
+        ):
+            unresolved_count = 1
         self.unresolved_count_var.set(
             f"Невирішених питань: {unresolved_count}"
         )
+        if unresolved_count > 0 or blocked_state:
+            unresolved_style = "Danger.TLabel"
+        elif self.workflow.state in {
+            WorkflowState.BATCH_READY,
+            WorkflowState.SENDING,
+            WorkflowState.COMPLETED,
+        }:
+            unresolved_style = "Success.TLabel"
+        else:
+            unresolved_style = "Subtitle.TLabel"
+        self.unresolved_count_label.configure(style=unresolved_style)
         if self.busy:
             for button in (
                 self.preflight_button,
@@ -1135,6 +1359,7 @@ class DesktopApplication:
                 "",
                 tk.END,
                 iid=str(index),
+                tags=("unresolved",),
                 values=(
                     problem.start.strftime("%d.%m.%Y"),
                     problem.start.strftime("%H:%M:%S"),
@@ -1145,6 +1370,11 @@ class DesktopApplication:
                     problem.recommended_action,
                 ),
             )
+        tree.tag_configure(
+            "unresolved",
+            background=DANGER_BACKGROUND,
+            foreground=DANGER_FOREGROUND,
+        )
         tree.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
         buttons = ttk.Frame(window, padding=(12, 0, 12, 12))
         buttons.pack(fill=tk.X)
@@ -1500,6 +1730,11 @@ class DesktopApplication:
                 "",
                 tk.END,
                 iid=iid,
+                tags=(
+                    ("resolved",)
+                    if result.is_resolved
+                    else ("unresolved",)
+                ),
                 values=(
                     result.segment.estimated_start.strftime(
                         "%d.%m.%Y %H:%M:%S"
@@ -1542,6 +1777,7 @@ class DesktopApplication:
                 "",
                 tk.END,
                 iid=iid,
+                tags=("unresolved",),
                 values=(
                     "—",
                     event.start.strftime("%d.%m.%Y %H:%M"),
@@ -1561,6 +1797,7 @@ class DesktopApplication:
                 "",
                 tk.END,
                 iid=f"parse-{index}",
+                tags=("unresolved",),
                 values=(
                     "—",
                     "—",
@@ -1575,6 +1812,7 @@ class DesktopApplication:
                     "—",
                 ),
             )
+        self._reapply_tree_sort(self.google_event_tree)
 
     def _resolve_next_zoom_problem(self) -> None:
         if self.workflow.state is not WorkflowState.RESOLUTION_REQUIRED:
@@ -2619,6 +2857,7 @@ class DesktopApplication:
                     telegram_label,
                 ),
             )
+        self._reapply_tree_sort(self.lesson_tree)
 
     def _show_selected_files(self, _event: object = None) -> None:
         self.preview_files.delete(0, tk.END)
