@@ -138,7 +138,7 @@ class CalendarClassificationTests(unittest.TestCase):
         self.assertFalse(parsed.requires_video)
         self.assertFalse(parsed.is_split_boundary)
 
-    def test_age_formats_and_subject_after_parentheses_are_supported(self) -> None:
+    def test_age_formats_default_to_individual_lesson(self) -> None:
         examples = {
             "10": "10р",
             "10р": "10р",
@@ -155,8 +155,8 @@ class CalendarClassificationTests(unittest.TestCase):
                 )
                 self.assertEqual(parsed.student_name, "Поліна")
                 self.assertEqual(parsed.student_age, 10)
-                self.assertEqual(parsed.lesson_type, "JAVAI")
-                self.assertIn(f"Поліна {expected} JAVAI", parsed.caption)
+                self.assertEqual(parsed.lesson_type, "індив")
+                self.assertIn(f"Поліна {expected} індив", parsed.caption)
 
     def test_trial_and_no_recording_combination_is_text_only_with_both_marks(self) -> None:
         parsed = parse_calendar_event(

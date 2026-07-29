@@ -44,9 +44,6 @@ _STUDENT_GROUP = re.compile(
     r"(?P<age>\d{1,2})\s*(?:р(?:оків)?|років)?\s*$",
     re.IGNORECASE,
 )
-_SERVICE_MARKERS = {"тг", "учко", "учечко"}
-
-
 @dataclass(frozen=True, slots=True)
 class ParsedCalendarEvent:
     event_id: str
@@ -404,15 +401,4 @@ def _parse_student_fields(
             break
     if student_group is None:
         return student_id, "", None, "", "Не знайдено ім’я та вік у дужках"
-    lesson_type = _clean_lesson_type(value[student_group.end():])
-    return student_id, student_name, student_age, lesson_type or "індив", ""
-
-
-def _clean_lesson_type(value: str) -> str:
-    value = value.replace("|", " ")
-    tokens = [
-        token
-        for token in _normalize_text(value).split()
-        if token.casefold().strip("(),") not in _SERVICE_MARKERS
-    ]
-    return " ".join(tokens).strip()
+    return student_id, student_name, student_age, "індив", ""
