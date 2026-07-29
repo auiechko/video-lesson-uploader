@@ -9,6 +9,7 @@ description = "Send all videos from one lesson as a Telegram album."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "cryptg>=0.6,<1",
     "google-api-python-client>=2,<3",
     "google-auth-httplib2>=0.2,<1",
     "google-auth-oauthlib>=1.2,<2",
