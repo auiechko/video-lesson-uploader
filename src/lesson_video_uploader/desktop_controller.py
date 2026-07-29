@@ -357,6 +357,44 @@ def form_from_lesson(lesson: Lesson) -> LessonForm:
     )
 
 
+def save_lesson_to_batch(
+    *,
+    lessons: tuple[Lesson, ...],
+    lesson: Lesson,
+    editing_calendar_event_id: str | None = None,
+) -> tuple[Lesson, ...]:
+    """Add a lesson or replace the lesson currently open in the editor."""
+    editing_index: int | None = None
+    if editing_calendar_event_id is not None:
+        editing_index = next(
+            (
+                index
+                for index, item in enumerate(lessons)
+                if item.calendar_event_id == editing_calendar_event_id
+            ),
+            None,
+        )
+        if editing_index is None:
+            raise ValueError(
+                "Урок, який редагується, більше не існує в пакеті"
+            )
+
+    if any(
+        item.calendar_event_id == lesson.calendar_event_id
+        and index != editing_index
+        for index, item in enumerate(lessons)
+    ):
+        raise ValueError("Урок із цим Calendar event ID уже доданий")
+
+    updated = list(lessons)
+    if editing_index is None:
+        updated.append(lesson)
+    else:
+        updated[editing_index] = lesson
+    updated.sort(key=lambda item: (item.event_start, item.calendar_event_id))
+    return tuple(updated)
+
+
 def build_gui_manifest(
     *,
     profile_id: str,

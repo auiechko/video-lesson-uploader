@@ -12,6 +12,7 @@ from lesson_video_uploader.desktop_controller import (
     create_lesson_from_form,
     form_from_lesson,
     parse_target_peer,
+    save_lesson_to_batch,
 )
 from lesson_video_uploader.models import Lesson
 
@@ -261,6 +262,95 @@ class LessonFormTests(unittest.TestCase):
             restored = form_from_lesson(lesson)
 
         self.assertEqual(restored, form)
+
+    def test_saving_an_edit_replaces_lesson_without_removing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lesson.mp4"
+            path.touch()
+            original = create_lesson_from_form(
+                profile_id="main",
+                batch_id="batch",
+                form=LessonForm(
+                    calendar_event_id="event-1",
+                    event_start="2026-06-12 10:30",
+                    student_id="105813989",
+                    student_name="Ільяс",
+                    lesson_label="10р індив",
+                    duration_hours=1,
+                    is_trial=False,
+                    video_paths=(path,),
+                ),
+            )
+            edited = create_lesson_from_form(
+                profile_id="main",
+                batch_id="batch",
+                form=LessonForm(
+                    calendar_event_id="event-1",
+                    event_start="2026-06-12 10:30",
+                    student_id="105813989",
+                    student_name="Ільяс",
+                    lesson_label="11р індив",
+                    duration_hours=1,
+                    is_trial=False,
+                    video_paths=(path,),
+                ),
+            )
+
+            lessons = save_lesson_to_batch(
+                lessons=(original,),
+                lesson=edited,
+                editing_calendar_event_id="event-1",
+            )
+
+        self.assertEqual(len(lessons), 1)
+        self.assertEqual(lessons[0], edited)
+        self.assertIn("11р індив", lessons[0].caption)
+
+    def test_failed_edit_does_not_mutate_the_original_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_path = root / "first.mp4"
+            second_path = root / "second.mp4"
+            first_path.touch()
+            second_path.touch()
+            first = create_lesson_from_form(
+                profile_id="main",
+                batch_id="batch",
+                form=LessonForm(
+                    calendar_event_id="event-1",
+                    event_start="2026-06-12 10:30",
+                    student_id="1",
+                    student_name="Перший",
+                    lesson_label="10р індив",
+                    duration_hours=1,
+                    is_trial=False,
+                    video_paths=(first_path,),
+                ),
+            )
+            second = create_lesson_from_form(
+                profile_id="main",
+                batch_id="batch",
+                form=LessonForm(
+                    calendar_event_id="event-2",
+                    event_start="2026-06-12 11:30",
+                    student_id="2",
+                    student_name="Другий",
+                    lesson_label="11р індив",
+                    duration_hours=1,
+                    is_trial=False,
+                    video_paths=(second_path,),
+                ),
+            )
+            original = (first, second)
+
+            with self.assertRaisesRegex(ValueError, "уже доданий"):
+                save_lesson_to_batch(
+                    lessons=original,
+                    lesson=second,
+                    editing_calendar_event_id="event-1",
+                )
+
+        self.assertEqual(original, (first, second))
 
     def test_lesson_without_details_returns_blank_student_fields(self) -> None:
         lesson = Lesson(
