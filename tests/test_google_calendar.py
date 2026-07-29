@@ -500,10 +500,11 @@ class CalendarEventToLessonFormTests(unittest.TestCase):
         self.assertTrue(lesson.caption.endswith("(пробне) (без запису)"))
         self.assertIsNotNone(lesson.calendar_snapshot)
 
-    def test_cancelled_and_pause_events_cannot_be_imported_as_lessons(self) -> None:
+    def test_ignored_events_cannot_be_imported_as_lessons(self) -> None:
         for summary in (
             "ВП учень 105853087 Наталія (Святослав 14) Учко ТГ",
             "(ПАУЗА ДО ВЕРЕСНЯ) 105853087 Наталія (Святослав 14) Учко ТГ",
+            "Вільна година",
         ):
             with self.subTest(summary=summary):
                 with self.assertRaises(CalendarEventNotSendable):

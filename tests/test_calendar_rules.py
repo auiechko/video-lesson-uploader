@@ -138,6 +138,21 @@ class CalendarClassificationTests(unittest.TestCase):
         self.assertFalse(parsed.requires_video)
         self.assertFalse(parsed.is_split_boundary)
 
+    def test_free_hour_is_ignored_without_student_data(self) -> None:
+        parsed = parse_calendar_event(
+            event("  ВІЛЬНА   ГОДИНА\n4 – 5пп")
+        )
+
+        self.assertEqual(
+            parsed.status,
+            CalendarEventStatus.IGNORED_FREE_TIME,
+        )
+        self.assertFalse(parsed.is_conducted)
+        self.assertFalse(parsed.requires_video)
+        self.assertFalse(parsed.is_split_boundary)
+        self.assertEqual(parsed.parse_error, "")
+        self.assertTrue(build_calendar_snapshot(parsed).is_free_time)
+
     def test_age_formats_default_to_individual_lesson(self) -> None:
         examples = {
             "10": "10р",
@@ -256,6 +271,29 @@ class CalendarSlotResolutionTests(unittest.TestCase):
 
         self.assertEqual(slot.selected.event_id, "normal")
         self.assertEqual([item.event_id for item in slot.ignored], ["cancelled"])
+
+    def test_free_hour_is_filtered_before_auto_selection(self) -> None:
+        parsed = (
+            parse_calendar_event(
+                event(
+                    "Вільна година",
+                    event_id="free",
+                    hour=18,
+                )
+            ),
+            parse_calendar_event(
+                event(
+                    "105813989 Сервер Османов (Ільяс 10) Учко ТГ",
+                    event_id="normal",
+                    hour=18,
+                )
+            ),
+        )
+
+        slot = resolve_calendar_slots(parsed, tolerance_minutes=10)[0]
+
+        self.assertEqual(slot.selected.event_id, "normal")
+        self.assertEqual([item.event_id for item in slot.ignored], ["free"])
 
     def test_events_more_than_tolerance_apart_are_different_slots(self) -> None:
         parsed = (

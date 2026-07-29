@@ -19,6 +19,7 @@ class CalendarEventStatus(StrEnum):
     TRANSFERRED = "TRANSFERRED"
     TRANSFERRED_TRIAL = "TRANSFERRED_TRIAL"
     TRANSFERRED_NO_RECORDING = "TRANSFERRED_NO_RECORDING"
+    IGNORED_FREE_TIME = "IGNORED_FREE_TIME"
     IGNORED_PAUSE = "IGNORED_PAUSE"
     IGNORED_CANCELLED = "IGNORED_CANCELLED"
     PARSE_ERROR = "PARSE_ERROR"
@@ -32,6 +33,10 @@ class CancellationSource(StrEnum):
 
 
 _SPACE_PATTERN = re.compile(r"\s+")
+_FREE_TIME_PREFIX = re.compile(
+    r"^\s*вільна\s+година\b",
+    re.IGNORECASE,
+)
 _PAUSE_PREFIX = re.compile(r"^\s*\(?\s*пауза\b", re.IGNORECASE)
 _CANCELLATION_PREFIX = re.compile(r"^\s*вп(?:\s|$)", re.IGNORECASE)
 _TRANSFER_PREFIX = re.compile(r"^\s*перенос(?:\s|$)", re.IGNORECASE)
@@ -70,6 +75,7 @@ class ParsedCalendarEvent:
     def is_conducted(self) -> bool:
         return self.status not in {
             CalendarEventStatus.IGNORED_CANCELLED,
+            CalendarEventStatus.IGNORED_FREE_TIME,
             CalendarEventStatus.IGNORED_PAUSE,
             CalendarEventStatus.PARSE_ERROR,
             CalendarEventStatus.MANUAL_SELECTION_REQUIRED,
@@ -149,6 +155,7 @@ class CalendarEventSnapshot:
     recurring_event_id: str = ""
     original_start_utc: str = ""
     event_timezone: str = ""
+    is_free_time: bool = False
 
 
 class BatchRevalidationRequired(RuntimeError):
@@ -182,6 +189,7 @@ def parse_calendar_event(
     start = _local_datetime(event.start, timezone)
     end = _local_datetime(event.end, timezone)
     summary = _normalize_text(event.summary)
+    is_free_time = bool(_FREE_TIME_PREFIX.match(summary))
     is_pause = bool(_PAUSE_PREFIX.match(summary))
     is_cancelled = bool(_CANCELLATION_PREFIX.match(summary))
     is_transferred = bool(_TRANSFER_PREFIX.match(summary))
@@ -190,7 +198,9 @@ def parse_calendar_event(
     cancellation_source: CancellationSource | None = None
 
     content = summary
-    if is_pause:
+    if is_free_time:
+        content = ""
+    elif is_pause:
         content = _from_first_student_id(content)
     elif is_cancelled:
         content, cancellation_source = _strip_cancellation_prefix(content)
@@ -200,11 +210,20 @@ def parse_calendar_event(
     content = _TRIAL_MARKER.sub(" ", content)
     content = _NO_RECORDING_MARKER.sub(" ", content)
     content = _normalize_text(content)
-    student_id, student_name, student_age, lesson_type, error = (
-        _parse_student_fields(content)
-    )
+    if is_free_time:
+        student_id = ""
+        student_name = ""
+        student_age = None
+        lesson_type = ""
+        error = ""
+    else:
+        student_id, student_name, student_age, lesson_type, error = (
+            _parse_student_fields(content)
+        )
 
-    if is_pause:
+    if is_free_time:
+        status = CalendarEventStatus.IGNORED_FREE_TIME
+    elif is_pause:
         status = CalendarEventStatus.IGNORED_PAUSE
     elif is_cancelled:
         status = CalendarEventStatus.IGNORED_CANCELLED
@@ -273,6 +292,7 @@ def _resolve_slot(events: list[ParsedCalendarEvent]) -> CalendarSlotResolution:
         for item in events
         if item.status in {
             CalendarEventStatus.IGNORED_CANCELLED,
+            CalendarEventStatus.IGNORED_FREE_TIME,
             CalendarEventStatus.IGNORED_PAUSE,
         }
     )
@@ -333,6 +353,9 @@ def build_calendar_snapshot(
             else ""
         ),
         event_timezone=event.event_timezone,
+        is_free_time=(
+            event.status is CalendarEventStatus.IGNORED_FREE_TIME
+        ),
     )
 
 

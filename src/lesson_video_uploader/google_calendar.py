@@ -321,6 +321,7 @@ def calendar_event_to_lesson_form(
     parsed = parse_calendar_event(event, timezone_name=timezone_name)
     if parsed.status in {
         CalendarEventStatus.IGNORED_CANCELLED,
+        CalendarEventStatus.IGNORED_FREE_TIME,
         CalendarEventStatus.IGNORED_PAUSE,
     }:
         raise CalendarEventNotSendable(
