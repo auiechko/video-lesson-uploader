@@ -1,5 +1,22 @@
 # Lesson Video Uploader
 
+## Документація та підтримка
+
+📘 [Повна інструкція з налаштування та роботи](https://docs.google.com/document/d/1INbJYSd5WB0aLitkTk7TKnvUeTFxuLPrH1TBE2aiyPM/edit?usp=sharing)
+
+⭐ Якщо застосунок став у пригоді, будь ласка,
+[відкрийте репозиторій](https://github.com/auiechko/video-lesson-uploader)
+і натисніть **Star**. Це допомагає проєкту розвиватися та показує, що робота
+справді корисна.
+
+Питання, повідомлення про баги та пропозиції:
+[@Auiechko у Telegram](https://t.me/Auiechko).
+
+Підтримати подальшу розробку фінансово:
+
+- [ПриватБанк — конверт підтримки](https://www.privat24.ua/send/4lpla);
+- [Monobank — банка підтримки](https://send.monobank.ua/jar/8yCkenYzpg).
+
 Python/Telethon-застосунок, у якому одна одиниця надсилання — це один календарний
 урок, а не один відеофайл. Усі MP4 одного `calendar_event_id` надсилаються одним
 Telegram media group у заданому хронологічному порядку.
