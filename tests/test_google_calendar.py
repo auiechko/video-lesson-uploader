@@ -343,6 +343,46 @@ class GoogleCalendarServiceTests(unittest.TestCase):
             )
         self.assertEqual(api.event_resource.calls, [])
 
+    def test_recurring_occurrence_metadata_is_preserved(self) -> None:
+        api = FakeCalendarApi(
+            calendars=[],
+            events=[{
+                "items": [{
+                    "id": "instance-20260729",
+                    "recurringEventId": "series-1",
+                    "status": "confirmed",
+                    "summary": (
+                        "105853087 Наталія (Святослав 14) Учко ТГ"
+                    ),
+                    "start": {
+                        "dateTime": "2026-07-29T19:00:00+03:00",
+                        "timeZone": "Europe/Kyiv",
+                    },
+                    "end": {
+                        "dateTime": "2026-07-29T20:00:00+03:00",
+                        "timeZone": "Europe/Kyiv",
+                    },
+                    "originalStartTime": {
+                        "dateTime": "2026-07-29T19:00:00+03:00",
+                    },
+                }],
+            }],
+        )
+
+        event = GoogleCalendarService(api).list_events(
+            calendar_id="primary",
+            date_from=date(2026, 7, 29),
+            date_to=date(2026, 7, 29),
+            timezone_name="Europe/Kyiv",
+        )[0]
+
+        self.assertEqual(event.recurring_event_id, "series-1")
+        self.assertEqual(
+            event.original_start.isoformat(),
+            "2026-07-29T19:00:00+03:00",
+        )
+        self.assertEqual(event.event_timezone, "Europe/Kyiv")
+
 
 class CalendarEventToLessonFormTests(unittest.TestCase):
     @staticmethod

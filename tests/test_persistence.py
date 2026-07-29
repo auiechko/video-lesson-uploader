@@ -141,6 +141,41 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(restored.student_name, "Святик")
         self.assertEqual(restored.student_age, 15)
 
+    def test_calendar_report_preserves_recurring_occurrence_metadata(self) -> None:
+        kyiv = ZoneInfo("Europe/Kyiv")
+        parsed = parse_calendar_event(
+            GoogleCalendarEvent(
+                id="instance-1",
+                calendar_id="lessons",
+                summary=(
+                    "105853087 Наталія (Святослав 14) Учко ТГ"
+                ),
+                description="",
+                start=datetime(2026, 7, 29, 19, tzinfo=kyiv),
+                end=datetime(2026, 7, 29, 20, tzinfo=kyiv),
+                recurring_event_id="series-1",
+                original_start=datetime(2026, 7, 29, 19, tzinfo=kyiv),
+                event_timezone="Europe/Kyiv",
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteSendItemRepository(
+                Path(directory) / "db.sqlite3"
+            )
+
+            repository.save_calendar_event_report(parsed)
+            restored = repository.get_calendar_event_report(
+                "lessons",
+                "instance-1",
+            )
+
+        self.assertEqual(restored.recurring_event_id, "series-1")
+        self.assertEqual(
+            restored.original_start_utc,
+            datetime(2026, 7, 29, 16, tzinfo=timezone.utc),
+        )
+        self.assertEqual(restored.event_timezone, "Europe/Kyiv")
+
     def test_round_trip_preserves_ordered_paths_and_every_message_id(self) -> None:
         lesson = Lesson(
             profile_id="profile-1",
@@ -208,6 +243,27 @@ class PersistenceTests(unittest.TestCase):
             loaded = repository.get(lesson.identity)
 
         self.assertEqual(loaded, lesson)
+
+    def test_backup_creates_readable_sqlite_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = SQLiteSendItemRepository(root / "db.sqlite3")
+            lesson = Lesson(
+                profile_id="profile-1",
+                batch_id="batch-1",
+                calendar_event_id="event-1",
+                event_start=datetime(2026, 6, 12, 10),
+                caption="caption",
+                ordered_video_paths=(Path("video.mp4"),),
+            )
+            repository.save(lesson)
+
+            backup = repository.create_backup(root / "backups")
+            restored = SQLiteSendItemRepository(backup).get(lesson.identity)
+
+        self.assertIsNotNone(restored)
+        self.assertTrue(backup.name.startswith("deliveries-"))
+        self.assertEqual(backup.suffix, ".sqlite3")
 
 
 if __name__ == "__main__":
