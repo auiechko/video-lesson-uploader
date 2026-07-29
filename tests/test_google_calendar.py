@@ -419,7 +419,17 @@ class CalendarEventToLessonFormTests(unittest.TestCase):
         self.assertEqual(form.student_name, "Ільяс")
         self.assertEqual(form.lesson_label, "10р індив")
 
-    def test_keeps_subject_after_parentheses_and_normalizes_age(self) -> None:
+    def test_teacher_surname_uechko_is_not_added_to_lesson_label(self) -> None:
+        event = self._event_from_summary(
+            "105813989 Сервер Османов (Ільяс 10) Уечко ТГ"
+        )
+
+        form = calendar_event_to_lesson_form(event)
+
+        self.assertEqual(form.student_name, "Ільяс")
+        self.assertEqual(form.lesson_label, "10р індив")
+
+    def test_ignores_subject_after_parentheses_for_individual_lesson(self) -> None:
         event = self._event_from_summary(
             "106248208 Valentyna Stoieva ТГ (Поліна 15р) JAVA | Учечко"
         )
@@ -428,7 +438,7 @@ class CalendarEventToLessonFormTests(unittest.TestCase):
 
         self.assertEqual(form.student_id, "106248208")
         self.assertEqual(form.student_name, "Поліна")
-        self.assertEqual(form.lesson_label, "15р JAVA")
+        self.assertEqual(form.lesson_label, "15р індив")
 
     def test_no_recording_event_becomes_text_only_lesson_without_mp4(self) -> None:
         event = self._event_from_summary(
