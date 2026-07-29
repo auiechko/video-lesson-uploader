@@ -185,6 +185,43 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, sent)
         self.client.get_messages.assert_not_awaited()
 
+    async def test_pending_lesson_is_not_misclassified_as_unknown(self) -> None:
+        pending = replace(self.lesson, status=SendStatus.PENDING)
+        self.repository.save(pending)
+        reconciler = TelegramDeliveryReconciler(
+            self.client,
+            self.repository,
+        )
+
+        result = await reconciler.reconcile(
+            pending,
+            target_peer="group",
+        )
+
+        self.assertEqual(result.status, SendStatus.PENDING)
+        self.client.get_messages.assert_not_awaited()
+
+    async def test_existing_partial_evidence_is_not_discarded(self) -> None:
+        partial = replace(
+            self.lesson,
+            status=SendStatus.PARTIALLY_CONFIRMED,
+            telegram_message_ids=(101,),
+        )
+        self.repository.save(partial)
+        self.client.get_messages.return_value = []
+        reconciler = TelegramDeliveryReconciler(
+            self.client,
+            self.repository,
+        )
+
+        result = await reconciler.reconcile(
+            partial,
+            target_peer="group",
+        )
+
+        self.assertEqual(result.status, SendStatus.PARTIALLY_CONFIRMED)
+        self.assertEqual(result.telegram_message_ids, (101,))
+
 
 if __name__ == "__main__":
     unittest.main()

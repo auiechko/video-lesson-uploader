@@ -78,13 +78,15 @@ class TelethonLessonSender:
                 SendStatus.PARTIALLY_CONFIRMED,
             }:
                 raise ManualReviewRequired(
-                    "Check recent Telegram messages before retrying this lesson."
+                    "Перед повтором перевірте останні повідомлення Telegram "
+                    "для цього уроку."
                 )
             if existing.status is SendStatus.UPLOADING:
                 unknown = replace(existing, status=SendStatus.DELIVERY_UNKNOWN)
                 self.repository.save(unknown)
                 raise ManualReviewRequired(
-                    "A previous upload was interrupted; verify Telegram manually."
+                    "Попереднє завантаження було перервано. Перевірте "
+                    "Telegram вручну."
                 )
 
         if lesson.send_mode is LessonSendMode.TEXT_ONLY:
@@ -98,7 +100,15 @@ class TelethonLessonSender:
             album_split_warning(lesson.caption, len(plans))
         report_progress = _lesson_progress(lesson, progress_callback)
 
-        uploading = replace(lesson, status=SendStatus.UPLOADING)
+        uploading = replace(
+            lesson,
+            telegram_album_group_id=None,
+            telegram_message_ids=(),
+            album_deliveries=(),
+            status=SendStatus.UPLOADING,
+            created_at=datetime.now(timezone.utc),
+            sent_at=None,
+        )
         self.repository.save(uploading)
         message_ids: list[int] = []
         deliveries: list[AlbumDelivery] = []
@@ -142,22 +152,23 @@ class TelethonLessonSender:
                 ))
                 if len(batch_ids) != len(plan.video_paths):
                     return self._save_unconfirmed(
-                        lesson,
+                        uploading,
                         message_ids=message_ids,
                         deliveries=deliveries,
                     )
         except Exception as error:
             self._save_unconfirmed(
-                lesson,
+                uploading,
                 message_ids=message_ids,
                 deliveries=deliveries,
             )
             raise ManualReviewRequired(
-                "Telegram delivery is unknown; inspect recent messages before retrying."
+                "Статус доставки Telegram невідомий. Перевірте останні "
+                "повідомлення перед повтором."
             ) from error
 
         sent = replace(
-            lesson,
+            uploading,
             telegram_album_group_id=(
                 deliveries[0].telegram_album_group_id
                 if len(deliveries) == 1
@@ -177,7 +188,14 @@ class TelethonLessonSender:
         *,
         target_peer: object,
     ) -> Lesson:
-        self.repository.save(replace(lesson, status=SendStatus.UPLOADING))
+        uploading = replace(
+            lesson,
+            telegram_message_ids=(),
+            status=SendStatus.UPLOADING,
+            created_at=datetime.now(timezone.utc),
+            sent_at=None,
+        )
+        self.repository.save(uploading)
         try:
             response = await self.client.send_message(
                 entity=target_peer,
@@ -186,21 +204,22 @@ class TelethonLessonSender:
             message_id = getattr(response, "id", None)
             if not isinstance(message_id, int):
                 return self._save_unconfirmed(
-                    lesson,
+                    uploading,
                     message_ids=[],
                     deliveries=[],
                 )
         except Exception as error:
             self._save_unconfirmed(
-                lesson,
+                uploading,
                 message_ids=[],
                 deliveries=[],
             )
             raise ManualReviewRequired(
-                "Telegram delivery is unknown; inspect recent messages before retrying."
+                "Статус доставки Telegram невідомий. Перевірте останні "
+                "повідомлення перед повтором."
             ) from error
         sent = replace(
-            lesson,
+            uploading,
             telegram_message_ids=(message_id,),
             status=SendStatus.SENT,
             sent_at=datetime.now(timezone.utc),

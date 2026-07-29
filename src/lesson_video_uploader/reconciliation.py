@@ -46,6 +46,12 @@ class TelegramDeliveryReconciler:
         current = self.repository.get(lesson.identity) or lesson
         if current.status is SendStatus.SENT:
             return current
+        if current.status not in {
+            SendStatus.UPLOADING,
+            SendStatus.DELIVERY_UNKNOWN,
+            SendStatus.PARTIALLY_CONFIRMED,
+        }:
+            return current
         messages = list(
             await self.client.get_messages(target_peer, limit=message_limit)
         )
@@ -127,13 +133,7 @@ class TelegramDeliveryReconciler:
             self.repository.save(partial_lesson)
             return partial_lesson
 
-        unknown = replace(
-            current,
-            telegram_album_group_id=None,
-            telegram_message_ids=(),
-            album_deliveries=(),
-            status=SendStatus.DELIVERY_UNKNOWN,
-        )
+        unknown = self._unresolved_result(current)
         self.repository.save(unknown)
         return unknown
 
@@ -165,13 +165,24 @@ class TelegramDeliveryReconciler:
             )
             self.repository.save(sent)
             return sent
-        unknown = replace(
-            lesson,
-            telegram_message_ids=(),
-            status=SendStatus.DELIVERY_UNKNOWN,
-        )
+        unknown = self._unresolved_result(lesson)
         self.repository.save(unknown)
         return unknown
+
+    @staticmethod
+    def _unresolved_result(lesson: Lesson) -> Lesson:
+        if (
+            lesson.status is SendStatus.PARTIALLY_CONFIRMED
+            and lesson.telegram_message_ids
+        ):
+            return lesson
+        return replace(
+            lesson,
+            telegram_album_group_id=None,
+            telegram_message_ids=(),
+            album_deliveries=(),
+            status=SendStatus.DELIVERY_UNKNOWN,
+        )
 
     @staticmethod
     def _group_messages(messages: list[Any]) -> list[list[Any]]:

@@ -238,6 +238,29 @@ class TelegramDesktopService:
         progress_callback: ProgressCallback | None = None,
         calendar_revalidator: CalendarRevalidator | None = None,
     ) -> tuple[Lesson, ...]:
+        repository = SQLiteSendItemRepository(self.database_path)
+        blocked_lessons = [
+            current
+            for lesson in manifest.lessons
+            if (
+                (current := repository.get(lesson.identity))
+                is not None
+                and current.status in {
+                    SendStatus.UPLOADING,
+                    SendStatus.DELIVERY_UNKNOWN,
+                    SendStatus.PARTIALLY_CONFIRMED,
+                }
+            )
+        ]
+        if blocked_lessons:
+            first = blocked_lessons[0]
+            raise ManualReviewRequired(
+                "Надсилання заблоковано: "
+                f"{len(blocked_lessons)} урок(и) мають невідому або "
+                "незавершену доставку. Натисніть «Перевірити невідому "
+                "доставку», а після перевірки Telegram — «Скинути історію "
+                f"незавершених». Перший урок: {first.caption}"
+            )
         snapshots = {
             lesson.calendar_event_id: lesson.calendar_snapshot
             for lesson in manifest.lessons
@@ -257,7 +280,6 @@ class TelegramDesktopService:
                     })
                 await calendar_revalidator(snapshots)
             except BatchRevalidationRequired:
-                repository = SQLiteSendItemRepository(self.database_path)
                 for lesson in manifest.lessons:
                     repository.save(replace(
                         lesson,
@@ -284,7 +306,6 @@ class TelegramDesktopService:
                 raise ValueError(
                     f"Telegram-чат недоступний: {target_peer}"
                 ) from error
-            repository = SQLiteSendItemRepository(self.database_path)
             sender = TelethonLessonSender(
                 client,  # type: ignore[arg-type]
                 repository,
@@ -292,8 +313,20 @@ class TelegramDesktopService:
             )
             results: list[Lesson] = []
             for lesson in manifest.lessons:
+                existing = repository.get(lesson.identity)
+                if (
+                    status_callback
+                    and existing is not None
+                    and existing.status is SendStatus.SENT
+                ):
+                    status_callback(
+                        f"Пропущено, вже надіслано: {lesson.caption}"
+                    )
                 await _ensure_connected(client)
-                if status_callback:
+                if status_callback and (
+                    existing is None
+                    or existing.status is not SendStatus.SENT
+                ):
                     status_callback(f"Надсилання: {lesson.caption}")
                 result = await sender.send(
                     lesson,
@@ -327,6 +360,26 @@ class TelegramDesktopService:
         target_peer: object,
         status_callback: StatusCallback | None = None,
     ) -> tuple[Lesson, ...]:
+        repository = SQLiteSendItemRepository(self.database_path)
+        current_lessons = tuple(
+            repository.get(lesson.identity) or lesson
+            for lesson in manifest.lessons
+        )
+        uncertain_statuses = {
+            SendStatus.UPLOADING,
+            SendStatus.DELIVERY_UNKNOWN,
+            SendStatus.PARTIALLY_CONFIRMED,
+        }
+        if not any(
+            lesson.status in uncertain_statuses
+            for lesson in current_lessons
+        ):
+            if status_callback:
+                for lesson in current_lessons:
+                    status_callback(
+                        f"{lesson.caption}: {lesson.status.value}"
+                    )
+            return current_lessons
         client = self._client(config, api_hash, manifest.profile_id)
         try:
             if not await _run_connected(
@@ -336,7 +389,6 @@ class TelegramDesktopService:
                 raise TelegramLoginRequired(
                     "Спочатку натисніть «Увійти в Telegram»"
                 )
-            repository = SQLiteSendItemRepository(self.database_path)
             reconciler = TelegramDeliveryReconciler(
                 client,  # type: ignore[arg-type]
                 repository,

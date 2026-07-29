@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -164,7 +165,8 @@ class SenderTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_delivery_after_exception_is_not_automatically_retried(self) -> None:
         self.client.send_file.side_effect = TimeoutError("connection lost")
         sender = TelethonLessonSender(self.client, self.repository)
-        item = lesson(2)
+        old_created_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        item = replace(lesson(2), created_at=old_created_at)
 
         with self.assertRaises(ManualReviewRequired):
             await sender.send(item, target_peer="group")
@@ -172,6 +174,7 @@ class SenderTests(unittest.IsolatedAsyncioTestCase):
         saved = self.repository.get(item.identity)
         self.assertIsNotNone(saved)
         self.assertEqual(saved.status, SendStatus.DELIVERY_UNKNOWN)
+        self.assertGreater(saved.created_at, old_created_at)
         with self.assertRaises(ManualReviewRequired):
             await sender.send(item, target_peer="group")
         self.client.send_file.assert_awaited_once()

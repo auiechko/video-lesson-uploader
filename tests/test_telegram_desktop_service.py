@@ -16,6 +16,7 @@ from lesson_video_uploader.config import AppConfig
 from lesson_video_uploader.manifest import UploadManifest
 from lesson_video_uploader.models import Lesson, SendStatus
 from lesson_video_uploader.persistence import SQLiteSendItemRepository
+from lesson_video_uploader.sender import ManualReviewRequired
 from lesson_video_uploader.telegram_desktop import (
     LoginResult,
     TelegramAuthService,
@@ -192,6 +193,53 @@ class TelegramDesktopServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.client.send_file.assert_not_awaited()
         self.client.disconnect.assert_awaited_once()
+
+    async def test_uncertain_delivery_blocks_whole_batch_before_connect(
+        self,
+    ) -> None:
+        database = Path(self.temp_dir.name) / "db.sqlite3"
+        repository = SQLiteSendItemRepository(database)
+        repository.save(replace(
+            self.lesson,
+            status=SendStatus.DELIVERY_UNKNOWN,
+        ))
+        service = TelegramDesktopService(
+            lambda **_: self.client,
+            database,
+        )
+
+        with self.assertRaisesRegex(
+            ManualReviewRequired,
+            "Скинути історію незавершених",
+        ):
+            await service.send_manifest(
+                self.manifest,
+                self.config,
+                "api-hash",
+                target_peer="me",
+            )
+
+        self.client.connect.assert_not_awaited()
+        self.client.send_file.assert_not_awaited()
+
+    async def test_reconciliation_keeps_pending_without_connecting(
+        self,
+    ) -> None:
+        service = TelegramDesktopService(
+            lambda **_: self.client,
+            Path(self.temp_dir.name) / "db.sqlite3",
+        )
+
+        results = await service.reconcile_manifest(
+            self.manifest,
+            self.config,
+            "api-hash",
+            target_peer="me",
+        )
+
+        self.assertEqual(results[0].status, SendStatus.PENDING)
+        self.client.connect.assert_not_awaited()
+        self.client.get_messages.assert_not_awaited()
 
     async def test_disconnected_preflight_request_reconnects_once(self) -> None:
         self.client.is_user_authorized.side_effect = [
