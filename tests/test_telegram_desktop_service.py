@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from lesson_video_uploader.calendar_rules import (
     BatchRevalidationRequired,
@@ -19,6 +19,7 @@ from lesson_video_uploader.persistence import SQLiteSendItemRepository
 from lesson_video_uploader.telegram_desktop import (
     LoginResult,
     TelegramAuthService,
+    TelegramConnectionUnavailable,
     TelegramDesktopService,
     TelegramLoginRequired,
 )
@@ -30,8 +31,17 @@ class PasswordNeeded(Exception):
 
 class FakeClient:
     def __init__(self) -> None:
-        self.connect = AsyncMock()
-        self.disconnect = AsyncMock()
+        self.connected = False
+
+        async def connect() -> None:
+            self.connected = True
+
+        async def disconnect() -> None:
+            self.connected = False
+
+        self.connect = AsyncMock(side_effect=connect)
+        self.disconnect = AsyncMock(side_effect=disconnect)
+        self.is_connected = Mock(side_effect=lambda: self.connected)
         self.is_user_authorized = AsyncMock(return_value=True)
         self.send_code_request = AsyncMock(
             return_value=SimpleNamespace(phone_code_hash="phone-hash")
@@ -182,6 +192,55 @@ class TelegramDesktopServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.client.send_file.assert_not_awaited()
         self.client.disconnect.assert_awaited_once()
+
+    async def test_disconnected_preflight_request_reconnects_once(self) -> None:
+        self.client.is_user_authorized.side_effect = [
+            ConnectionError("Cannot send requests while disconnected"),
+            True,
+        ]
+        self.client.send_file.return_value = [
+            SimpleNamespace(id=101, grouped_id=777),
+            SimpleNamespace(id=102, grouped_id=777),
+        ]
+        service = TelegramDesktopService(
+            lambda **_: self.client,
+            Path(self.temp_dir.name) / "db.sqlite3",
+        )
+
+        results = await service.send_manifest(
+            self.manifest,
+            self.config,
+            "api-hash",
+            target_peer="me",
+        )
+
+        self.assertEqual(results[0].status, SendStatus.SENT)
+        self.assertEqual(self.client.connect.await_count, 2)
+        self.assertEqual(self.client.is_user_authorized.await_count, 2)
+        self.client.send_file.assert_awaited_once()
+
+    async def test_repeated_disconnect_uses_clear_ukrainian_error(self) -> None:
+        self.client.is_user_authorized.side_effect = ConnectionError(
+            "Cannot send requests while disconnected"
+        )
+        service = TelegramDesktopService(
+            lambda **_: self.client,
+            Path(self.temp_dir.name) / "db.sqlite3",
+        )
+
+        with self.assertRaisesRegex(
+            TelegramConnectionUnavailable,
+            "З’єднання з Telegram втрачено",
+        ):
+            await service.send_manifest(
+                self.manifest,
+                self.config,
+                "api-hash",
+                target_peer="me",
+            )
+
+        self.assertEqual(self.client.connect.await_count, 2)
+        self.client.send_file.assert_not_awaited()
 
     async def test_calendar_change_blocks_batch_before_telegram_upload(self) -> None:
         snapshot = CalendarEventSnapshot(

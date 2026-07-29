@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from .calendar_rules import (
     BatchRevalidationRequired,
@@ -23,6 +24,10 @@ class TelegramLoginRequired(RuntimeError):
     pass
 
 
+class TelegramConnectionUnavailable(RuntimeError):
+    pass
+
+
 class LoginResult(StrEnum):
     AUTHORIZED = "AUTHORIZED"
     PASSWORD_REQUIRED = "PASSWORD_REQUIRED"
@@ -31,11 +36,67 @@ class LoginResult(StrEnum):
 class DesktopTelethonClient(Protocol):
     async def connect(self) -> None: ...
     async def disconnect(self) -> None: ...
+    def is_connected(self) -> bool: ...
     async def is_user_authorized(self) -> bool: ...
     async def get_entity(self, entity: object) -> object: ...
 
 
 ClientFactory = Callable[..., DesktopTelethonClient]
+ConnectedOperation = Callable[[], Awaitable[Any]]
+
+
+def _is_disconnected_error(error: BaseException) -> bool:
+    message = str(error).casefold()
+    return (
+        "cannot send requests while disconnected" in message
+        or "not connected" in message
+        or "connection is closed" in message
+    )
+
+
+async def _safe_disconnect(client: DesktopTelethonClient) -> None:
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
+
+
+async def _ensure_connected(client: DesktopTelethonClient) -> None:
+    if client.is_connected():
+        return
+    try:
+        await client.connect()
+    except Exception as error:
+        raise TelegramConnectionUnavailable(
+            "Не вдалося підключитися до Telegram. Перевірте інтернет "
+            "і повторіть дію."
+        ) from error
+    if not client.is_connected():
+        raise TelegramConnectionUnavailable(
+            "Telegram не встановив з’єднання. Перевірте інтернет "
+            "і повторіть дію."
+        )
+
+
+async def _run_connected(
+    client: DesktopTelethonClient,
+    operation: ConnectedOperation,
+) -> Any:
+    """Retry one safe pre-upload Telegram request after reconnecting."""
+    for attempt in range(2):
+        await _ensure_connected(client)
+        try:
+            return await operation()
+        except Exception as error:
+            if not _is_disconnected_error(error):
+                raise
+            if attempt == 1:
+                raise TelegramConnectionUnavailable(
+                    "З’єднання з Telegram втрачено. Перевірте інтернет "
+                    "і повторіть дію."
+                ) from error
+            await _safe_disconnect(client)
+    raise AssertionError("unreachable")
 
 
 def telethon_components() -> tuple[ClientFactory, type[BaseException]]:
@@ -82,12 +143,14 @@ class TelegramAuthService:
         if not config.phone:
             raise ValueError("Спочатку збережіть номер телефону Telegram")
         client = self._client(config, api_hash, profile_id)
-        await client.connect()
         try:
-            sent = await client.send_code_request(config.phone)  # type: ignore[attr-defined]
+            sent = await _run_connected(
+                client,
+                lambda: client.send_code_request(config.phone),  # type: ignore[attr-defined]
+            )
             return sent.phone_code_hash
         finally:
-            await client.disconnect()
+            await _safe_disconnect(client)
 
     async def verify_code(
         self,
@@ -99,19 +162,21 @@ class TelegramAuthService:
         profile_id: str = "main",
     ) -> LoginResult:
         client = self._client(config, api_hash, profile_id)
-        await client.connect()
         try:
             try:
-                await client.sign_in(  # type: ignore[attr-defined]
-                    phone=config.phone,
-                    code=code.strip(),
-                    phone_code_hash=phone_code_hash,
+                await _run_connected(
+                    client,
+                    lambda: client.sign_in(  # type: ignore[attr-defined]
+                        phone=config.phone,
+                        code=code.strip(),
+                        phone_code_hash=phone_code_hash,
+                    ),
                 )
             except self.password_required_error:
                 return LoginResult.PASSWORD_REQUIRED
             return LoginResult.AUTHORIZED
         finally:
-            await client.disconnect()
+            await _safe_disconnect(client)
 
     async def verify_password(
         self,
@@ -122,12 +187,14 @@ class TelegramAuthService:
         profile_id: str = "main",
     ) -> LoginResult:
         client = self._client(config, api_hash, profile_id)
-        await client.connect()
         try:
-            await client.sign_in(password=password)  # type: ignore[attr-defined]
+            await _run_connected(
+                client,
+                lambda: client.sign_in(password=password),  # type: ignore[attr-defined]
+            )
             return LoginResult.AUTHORIZED
         finally:
-            await client.disconnect()
+            await _safe_disconnect(client)
 
 
 StatusCallback = Callable[[str], object]
@@ -198,14 +265,21 @@ class TelegramDesktopService:
                     ))
                 raise
         client = self._client(config, api_hash, manifest.profile_id)
-        await client.connect()
         try:
-            if not await client.is_user_authorized():
+            if not await _run_connected(
+                client,
+                client.is_user_authorized,
+            ):
                 raise TelegramLoginRequired(
                     "Спочатку натисніть «Увійти в Telegram»"
                 )
             try:
-                await client.get_entity(target_peer)
+                await _run_connected(
+                    client,
+                    lambda: client.get_entity(target_peer),
+                )
+            except TelegramConnectionUnavailable:
+                raise
             except Exception as error:
                 raise ValueError(
                     f"Telegram-чат недоступний: {target_peer}"
@@ -218,6 +292,7 @@ class TelegramDesktopService:
             )
             results: list[Lesson] = []
             for lesson in manifest.lessons:
+                await _ensure_connected(client)
                 if status_callback:
                     status_callback(f"Надсилання: {lesson.caption}")
                 result = await sender.send(
@@ -241,7 +316,7 @@ class TelegramDesktopService:
                 results.append(result)
             return tuple(results)
         finally:
-            await client.disconnect()
+            await _safe_disconnect(client)
 
     async def reconcile_manifest(
         self,
@@ -253,9 +328,11 @@ class TelegramDesktopService:
         status_callback: StatusCallback | None = None,
     ) -> tuple[Lesson, ...]:
         client = self._client(config, api_hash, manifest.profile_id)
-        await client.connect()
         try:
-            if not await client.is_user_authorized():
+            if not await _run_connected(
+                client,
+                client.is_user_authorized,
+            ):
                 raise TelegramLoginRequired(
                     "Спочатку натисніть «Увійти в Telegram»"
                 )
@@ -267,13 +344,17 @@ class TelegramDesktopService:
             )
             results: list[Lesson] = []
             for lesson in manifest.lessons:
-                result = await reconciler.reconcile(
-                    lesson,
-                    target_peer=target_peer,
+                result = await _run_connected(
+                    client,
+                    partial(
+                        reconciler.reconcile,
+                        lesson,
+                        target_peer=target_peer,
+                    ),
                 )
                 results.append(result)
                 if status_callback:
                     status_callback(f"{lesson.caption}: {result.status.value}")
             return tuple(results)
         finally:
-            await client.disconnect()
+            await _safe_disconnect(client)
