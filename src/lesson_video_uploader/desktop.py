@@ -560,7 +560,78 @@ class DesktopApplication:
             side=tk.LEFT, padx=(12, 0)
         )
 
+    def _create_scrollable_page(
+        self,
+        parent: ttk.Frame,
+    ) -> tuple[ttk.Frame, tk.Canvas]:
+        canvas_background = (
+            ttk.Style(self.root).lookup("TFrame", "background") or "#f0f0f0"
+        )
+        canvas = tk.Canvas(
+            parent,
+            background=canvas_background,
+            highlightthickness=0,
+            yscrollincrement=30,
+        )
+        scrollbar = ttk.Scrollbar(
+            parent,
+            orient=tk.VERTICAL,
+            command=canvas.yview,
+        )
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        content = ttk.Frame(canvas)
+        content_window = canvas.create_window(
+            (0, 0),
+            window=content,
+            anchor=tk.NW,
+        )
+        content.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(
+                scrollregion=canvas.bbox("all"),
+            ),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(
+                content_window,
+                width=event.width,
+            ),
+        )
+        return content, canvas
+
+    @staticmethod
+    def _bind_page_mousewheel(
+        page: tk.Misc,
+        canvas: tk.Canvas,
+    ) -> None:
+        independently_scrollable = {
+            "Listbox",
+            "Text",
+            "Treeview",
+            "TCombobox",
+        }
+
+        def scroll_page(event: tk.Event[tk.Misc]) -> str:
+            direction = -1 if event.delta > 0 else 1
+            canvas.yview_scroll(direction, "units")
+            return "break"
+
+        def bind_recursively(widget: tk.Misc) -> None:
+            if widget.winfo_class() not in independently_scrollable:
+                widget.bind("<MouseWheel>", scroll_page, add="+")
+            for child in widget.winfo_children():
+                bind_recursively(child)
+
+        canvas.bind("<MouseWheel>", scroll_page, add="+")
+        bind_recursively(page)
+
     def _build_send_tab(self, parent: ttk.Frame) -> None:
+        page, self.send_page_canvas = self._create_scrollable_page(parent)
+        parent = page
         batch = ttk.LabelFrame(parent, text="Пакет", padding=10)
         batch.pack(fill=tk.X)
         self._labeled_entry(batch, "Profile ID", self.profile_var, 0, 0)
@@ -614,6 +685,11 @@ class DesktopApplication:
         ).pack(side=tk.RIGHT)
         self.action_buttons.extend((self.send_button, reconcile_button))
 
+        ttk.Label(
+            parent,
+            text="Журнал роботи",
+            style="Subtitle.TLabel",
+        ).pack(anchor=tk.W, pady=(10, 0))
         self.log = ScrolledText(
             parent,
             height=6,
@@ -622,6 +698,7 @@ class DesktopApplication:
             state=tk.DISABLED,
         )
         self.log.pack(fill=tk.X, pady=(10, 0))
+        self._bind_page_mousewheel(parent, self.send_page_canvas)
 
     def _build_lesson_editor(
         self,
@@ -761,50 +838,9 @@ class DesktopApplication:
         ).pack(side=tk.LEFT)
 
     def _build_google_tab(self, parent: ttk.Frame) -> None:
-        settings_view = ttk.Frame(parent)
-        settings_view.pack(fill=tk.X)
-        canvas_background = (
-            ttk.Style(self.root).lookup("TFrame", "background") or "#f0f0f0"
-        )
-        self.google_settings_canvas = tk.Canvas(
-            settings_view,
-            height=220,
-            background=canvas_background,
-            highlightthickness=0,
-        )
-        settings_scroll = ttk.Scrollbar(
-            settings_view,
-            orient=tk.VERTICAL,
-            command=self.google_settings_canvas.yview,
-        )
-        self.google_settings_canvas.configure(
-            yscrollcommand=settings_scroll.set,
-        )
-        self.google_settings_canvas.pack(
-            side=tk.LEFT,
-            fill=tk.X,
-            expand=True,
-        )
-        settings_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        settings_content = ttk.Frame(self.google_settings_canvas)
-        settings_window = self.google_settings_canvas.create_window(
-            (0, 0),
-            window=settings_content,
-            anchor=tk.NW,
-        )
-        settings_content.bind(
-            "<Configure>",
-            lambda _event: self.google_settings_canvas.configure(
-                scrollregion=self.google_settings_canvas.bbox("all"),
-            ),
-        )
-        self.google_settings_canvas.bind(
-            "<Configure>",
-            lambda event: self.google_settings_canvas.itemconfigure(
-                settings_window,
-                width=event.width,
-            ),
-        )
+        page, self.google_page_canvas = self._create_scrollable_page(parent)
+        parent = page
+        settings_content = parent
 
         connection = ttk.LabelFrame(
             settings_content,
@@ -1114,6 +1150,7 @@ class DesktopApplication:
             )
         )
         self._apply_workflow_state()
+        self._bind_page_mousewheel(parent, self.google_page_canvas)
 
     def _build_settings_tab(self, parent: ttk.Frame) -> None:
         intro = ttk.Label(
