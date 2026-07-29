@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from subprocess import CompletedProcess
+from typing import Any
 
 from .zoom_recordings import Mp4Metadata
 
@@ -23,6 +25,32 @@ CommandRunner = Callable[..., CompletedProcess[str]]
 
 class MediaToolError(RuntimeError):
     pass
+
+
+def subprocess_window_options(
+    *,
+    platform_name: str | None = None,
+) -> dict[str, Any]:
+    if (platform_name or os.name) != "nt":
+        return {}
+    options: dict[str, Any] = {
+        "creationflags": getattr(
+            subprocess,
+            "CREATE_NO_WINDOW",
+            0x08000000,
+        )
+    }
+    startupinfo_factory = getattr(subprocess, "STARTUPINFO", None)
+    if startupinfo_factory is not None:
+        startupinfo = startupinfo_factory()
+        startupinfo.dwFlags |= getattr(
+            subprocess,
+            "STARTF_USESHOWWINDOW",
+            0x00000001,
+        )
+        startupinfo.wShowWindow = 0
+        options["startupinfo"] = startupinfo
+    return options
 
 
 def bundled_ffmpeg_path() -> str:
@@ -82,6 +110,7 @@ def probe_mp4(
         capture_output=True,
         text=True,
         check=False,
+        **subprocess_window_options(),
     )
     return parse_ffmpeg_metadata(f"{result.stdout}\n{result.stderr}")
 
@@ -143,6 +172,7 @@ def extract_preview_frames(
             capture_output=True,
             text=True,
             check=False,
+            **subprocess_window_options(),
         )
         if result.returncode != 0 or not target.is_file():
             raise MediaToolError(
@@ -203,6 +233,7 @@ def split_mp4(
             capture_output=True,
             text=True,
             check=False,
+            **subprocess_window_options(),
         )
         if result.returncode != 0:
             raise MediaToolError(
