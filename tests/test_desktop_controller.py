@@ -110,6 +110,12 @@ class DesktopSettingsControllerTests(unittest.TestCase):
                 client_secrets="C:/google/credentials.json",
                 calendar_id="primary",
                 timezone_name="Europe/Kyiv",
+                zoom_recordings_dir="D:/Zoom Recordings",
+                automatic_time_tolerance_minutes=25,
+                manual_time_search_window_minutes=150,
+                next_lesson_overlap_tolerance_minutes=7,
+                minimum_video_size_mb=6,
+                video_stability_check_seconds=4,
             )
 
         self.assertEqual(result.config.api_id, 123456)
@@ -119,6 +125,15 @@ class DesktopSettingsControllerTests(unittest.TestCase):
             result.config.google_client_secrets,
             "C:/google/credentials.json",
         )
+        self.assertEqual(
+            result.config.zoom_recordings_dir,
+            "D:/Zoom Recordings",
+        )
+        self.assertEqual(result.config.automatic_time_tolerance_minutes, 25)
+        self.assertEqual(result.config.manual_time_search_window_minutes, 150)
+        self.assertEqual(result.config.next_lesson_overlap_tolerance_minutes, 7)
+        self.assertEqual(result.config.minimum_video_size_mb, 6)
+        self.assertEqual(result.config.video_stability_check_seconds, 4)
         self.assertEqual(credentials.value, "telegram-secret")
 
     def test_environment_variable_is_not_used_instead_of_keyring(self) -> None:

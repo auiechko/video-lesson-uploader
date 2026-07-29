@@ -17,6 +17,12 @@ class ConfigTests(unittest.TestCase):
         config = load_config()
         self.assertEqual(config.album_batch, DEFAULT_ALBUM_BATCH_TEMPLATE)
         self.assertEqual(config.calendar_conflict_tolerance_minutes, 10)
+        self.assertEqual(config.automatic_time_tolerance_minutes, 30)
+        self.assertEqual(config.manual_time_search_window_minutes, 180)
+        self.assertEqual(config.next_lesson_overlap_tolerance_minutes, 10)
+        self.assertEqual(config.minimum_video_size_mb, 5)
+        self.assertEqual(config.video_stability_check_seconds, 5)
+        self.assertTrue(config.zoom_recordings_dir)
         self.assertFalse(hasattr(config, "part"))
 
     def test_custom_album_batch_template_is_loaded(self) -> None:
@@ -102,6 +108,49 @@ class ConfigTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "tolerance"):
+                load_config(path)
+
+    def test_zoom_settings_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            save_config(
+                path,
+                AppConfig(
+                    zoom_recordings_dir="C:/Users/teacher/Documents/Zoom",
+                    automatic_time_tolerance_minutes=17,
+                    manual_time_search_window_minutes=120,
+                    next_lesson_overlap_tolerance_minutes=8,
+                    minimum_video_size_mb=7.5,
+                    video_stability_check_seconds=3,
+                ),
+            )
+
+            text = path.read_text(encoding="utf-8")
+            loaded = load_config(path)
+
+        self.assertIn("[zoom]", text)
+        self.assertEqual(
+            loaded.zoom_recordings_dir,
+            "C:/Users/teacher/Documents/Zoom",
+        )
+        self.assertEqual(loaded.automatic_time_tolerance_minutes, 17)
+        self.assertEqual(loaded.manual_time_search_window_minutes, 120)
+        self.assertEqual(loaded.next_lesson_overlap_tolerance_minutes, 8)
+        self.assertEqual(loaded.minimum_video_size_mb, 7.5)
+        self.assertEqual(loaded.video_stability_check_seconds, 3)
+
+    def test_negative_zoom_tolerance_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.toml"
+            path.write_text(
+                "[zoom]\nautomatic_time_tolerance_minutes = -1\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "zoom.automatic_time_tolerance",
+            ):
                 load_config(path)
 
 
