@@ -132,6 +132,9 @@ class GoogleCalendarEvent:
     start: datetime
     end: datetime
     html_link: str = ""
+    recurring_event_id: str = ""
+    original_start: datetime | None = None
+    event_timezone: str = ""
 
     @property
     def duration_hours(self) -> int:
@@ -269,6 +272,13 @@ class GoogleCalendarService:
         end = _parse_rfc3339(end_raw, timezone)
         if end <= start:
             return None
+        original_start_data = item.get("originalStartTime", {})
+        original_start_raw = original_start_data.get("dateTime")
+        original_start = (
+            _parse_rfc3339(original_start_raw, timezone)
+            if isinstance(original_start_raw, str)
+            else None
+        )
         return GoogleCalendarEvent(
             id=event_id,
             calendar_id=calendar_id,
@@ -277,6 +287,13 @@ class GoogleCalendarService:
             start=start,
             end=end,
             html_link=str(item.get("htmlLink", "")).strip(),
+            recurring_event_id=str(
+                item.get("recurringEventId", "")
+            ).strip(),
+            original_start=original_start,
+            event_timezone=str(
+                start_data.get("timeZone", timezone.key)
+            ).strip(),
         )
 
 

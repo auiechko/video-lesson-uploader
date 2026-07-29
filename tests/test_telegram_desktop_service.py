@@ -39,6 +39,7 @@ class FakeClient:
         self.sign_in = AsyncMock()
         self.send_file = AsyncMock()
         self.get_messages = AsyncMock(return_value=[])
+        self.get_entity = AsyncMock(return_value=SimpleNamespace(id=999))
 
 
 class TelegramAuthServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -158,6 +159,28 @@ class TelegramDesktopServiceTests(unittest.IsolatedAsyncioTestCase):
             self.client.send_file.await_args.kwargs["entity"],
             -100999,
         )
+        self.client.get_entity.assert_awaited_once_with(-100999)
+        self.client.disconnect.assert_awaited_once()
+
+    async def test_unavailable_target_blocks_upload(self) -> None:
+        self.client.get_entity.side_effect = ValueError("chat not found")
+        service = TelegramDesktopService(
+            lambda **_: self.client,
+            Path(self.temp_dir.name) / "db.sqlite3",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Telegram-чат недоступний",
+        ):
+            await service.send_manifest(
+                self.manifest,
+                self.config,
+                "api-hash",
+                target_peer="missing-chat",
+            )
+
+        self.client.send_file.assert_not_awaited()
         self.client.disconnect.assert_awaited_once()
 
     async def test_calendar_change_blocks_batch_before_telegram_upload(self) -> None:

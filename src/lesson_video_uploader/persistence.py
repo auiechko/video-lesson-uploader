@@ -20,6 +20,13 @@ from .models import (
     LessonSendMode,
     SendStatus,
 )
+from .zoom_decisions import (
+    AssignmentType,
+    FileIdentity,
+    ZoomAssignmentDecision,
+    normalize_file_path,
+)
+from .zoom_recordings import ZoomVideoSegment
 
 
 class SQLiteSendItemRepository:
@@ -32,6 +39,17 @@ class SQLiteSendItemRepository:
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def create_backup(self, destination_directory: Path) -> Path:
+        destination_directory.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        destination = (
+            destination_directory / f"deliveries-{timestamp}.sqlite3"
+        )
+        with closing(self._connect()) as source:
+            with closing(sqlite3.connect(destination)) as target:
+                source.backup(target)
+        return destination
 
     def _initialize(self) -> None:
         with closing(self._connect()) as connection:
@@ -95,7 +113,57 @@ class SQLiteSendItemRepository:
                         is_no_recording INTEGER NOT NULL,
                         is_transferred INTEGER NOT NULL,
                         parse_error TEXT NOT NULL,
+                        recurring_event_id TEXT NOT NULL DEFAULT '',
+                        original_start_utc TEXT,
+                        event_timezone TEXT NOT NULL DEFAULT '',
                         PRIMARY KEY (calendar_id, event_id)
+                    )
+                """)
+                calendar_columns = {
+                    row["name"]
+                    for row in connection.execute(
+                        "PRAGMA table_info(calendar_event_reports)"
+                    ).fetchall()
+                }
+                calendar_migrations = {
+                    "recurring_event_id": (
+                        "ALTER TABLE calendar_event_reports ADD COLUMN "
+                        "recurring_event_id TEXT NOT NULL DEFAULT ''"
+                    ),
+                    "original_start_utc": (
+                        "ALTER TABLE calendar_event_reports ADD COLUMN "
+                        "original_start_utc TEXT"
+                    ),
+                    "event_timezone": (
+                        "ALTER TABLE calendar_event_reports ADD COLUMN "
+                        "event_timezone TEXT NOT NULL DEFAULT ''"
+                    ),
+                }
+                for column, statement in calendar_migrations.items():
+                    if column not in calendar_columns:
+                        connection.execute(statement)
+                connection.execute("""
+                    CREATE TABLE IF NOT EXISTS zoom_assignment_decisions (
+                        normalized_path TEXT PRIMARY KEY,
+                        filename TEXT NOT NULL,
+                        file_size INTEGER NOT NULL,
+                        duration_seconds REAL NOT NULL,
+                        zoom_start TEXT NOT NULL,
+                        partial_hash TEXT NOT NULL,
+                        calendar_event_id TEXT NOT NULL,
+                        event_start_utc TEXT NOT NULL,
+                        assignment_type TEXT NOT NULL,
+                        confirmed_by TEXT NOT NULL,
+                        confirmed_at TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        manual_split_point_seconds REAL,
+                        active INTEGER NOT NULL DEFAULT 1
+                    )
+                """)
+                connection.execute("""
+                    CREATE TABLE IF NOT EXISTS zoom_folder_overrides (
+                        normalized_path TEXT PRIMARY KEY,
+                        start TEXT NOT NULL
                     )
                 """)
 
@@ -123,6 +191,13 @@ class SQLiteSendItemRepository:
             event.is_no_recording,
             event.is_transferred,
             event.parse_error,
+            event.recurring_event_id,
+            (
+                event.original_start_utc.isoformat()
+                if event.original_start_utc is not None
+                else None
+            ),
+            event.event_timezone,
         )
         with closing(self._connect()) as connection:
             with connection:
@@ -131,8 +206,11 @@ class SQLiteSendItemRepository:
                         calendar_id, event_id, original_summary, student_id,
                         student_name, student_age, lesson_type, start, end,
                         status, cancellation_source, is_trial,
-                        is_no_recording, is_transferred, parse_error
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        is_no_recording, is_transferred, parse_error,
+                        recurring_event_id, original_start_utc, event_timezone
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
                     ON CONFLICT(calendar_id, event_id) DO UPDATE SET
                         original_summary=excluded.original_summary,
                         student_id=excluded.student_id,
@@ -146,7 +224,10 @@ class SQLiteSendItemRepository:
                         is_trial=excluded.is_trial,
                         is_no_recording=excluded.is_no_recording,
                         is_transferred=excluded.is_transferred,
-                        parse_error=excluded.parse_error
+                        parse_error=excluded.parse_error,
+                        recurring_event_id=excluded.recurring_event_id,
+                        original_start_utc=excluded.original_start_utc,
+                        event_timezone=excluded.event_timezone
                 """, values)
 
     def get_calendar_event_report(
@@ -184,7 +265,141 @@ class SQLiteSendItemRepository:
             is_no_recording=bool(row["is_no_recording"]),
             is_transferred=bool(row["is_transferred"]),
             parse_error=row["parse_error"],
+            recurring_event_id=row["recurring_event_id"],
+            original_start_utc=(
+                datetime.fromisoformat(row["original_start_utc"])
+                if row["original_start_utc"] is not None
+                else None
+            ),
+            event_timezone=row["event_timezone"],
         )
+
+    def save_zoom_decision(
+        self,
+        decision: ZoomAssignmentDecision,
+    ) -> None:
+        identity = decision.file_identity
+        with closing(self._connect()) as connection:
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO zoom_assignment_decisions (
+                        normalized_path, filename, file_size,
+                        duration_seconds, zoom_start, partial_hash,
+                        calendar_event_id, event_start_utc,
+                        assignment_type, confirmed_by, confirmed_at,
+                        reason, manual_split_point_seconds, active
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(normalized_path) DO UPDATE SET
+                        filename=excluded.filename,
+                        file_size=excluded.file_size,
+                        duration_seconds=excluded.duration_seconds,
+                        zoom_start=excluded.zoom_start,
+                        partial_hash=excluded.partial_hash,
+                        calendar_event_id=excluded.calendar_event_id,
+                        event_start_utc=excluded.event_start_utc,
+                        assignment_type=excluded.assignment_type,
+                        confirmed_by=excluded.confirmed_by,
+                        confirmed_at=excluded.confirmed_at,
+                        reason=excluded.reason,
+                        manual_split_point_seconds=excluded.manual_split_point_seconds,
+                        active=1
+                    """,
+                    (
+                        identity.normalized_path,
+                        identity.filename,
+                        identity.file_size,
+                        identity.duration_seconds,
+                        identity.zoom_start.isoformat(),
+                        identity.partial_hash,
+                        decision.calendar_event_id,
+                        decision.event_start_utc.isoformat(),
+                        decision.assignment_type.value,
+                        decision.confirmed_by,
+                        decision.confirmed_at.isoformat(),
+                        decision.reason,
+                        decision.manual_split_point_seconds,
+                    ),
+                )
+
+    def get_valid_zoom_decision(
+        self,
+        segment: ZoomVideoSegment,
+        event: ParsedCalendarEvent,
+    ) -> ZoomAssignmentDecision | None:
+        normalized_path = normalize_file_path(segment.path)
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM zoom_assignment_decisions
+                WHERE normalized_path = ? AND active = 1
+                """,
+                (normalized_path,),
+            ).fetchone()
+            if row is None:
+                return None
+            decision = ZoomAssignmentDecision(
+                file_identity=FileIdentity(
+                    normalized_path=row["normalized_path"],
+                    filename=row["filename"],
+                    file_size=row["file_size"],
+                    duration_seconds=row["duration_seconds"],
+                    zoom_start=datetime.fromisoformat(row["zoom_start"]),
+                    partial_hash=row["partial_hash"],
+                ),
+                calendar_event_id=row["calendar_event_id"],
+                event_start_utc=datetime.fromisoformat(
+                    row["event_start_utc"]
+                ),
+                assignment_type=AssignmentType(row["assignment_type"]),
+                confirmed_by=row["confirmed_by"],
+                confirmed_at=datetime.fromisoformat(row["confirmed_at"]),
+                reason=row["reason"],
+                manual_split_point_seconds=row[
+                    "manual_split_point_seconds"
+                ],
+            )
+            if decision.is_reusable(segment, event):
+                return decision
+            with connection:
+                connection.execute(
+                    """
+                    UPDATE zoom_assignment_decisions SET active = 0
+                    WHERE normalized_path = ?
+                    """,
+                    (normalized_path,),
+                )
+        return None
+
+    def save_zoom_folder_start(
+        self,
+        folder: Path,
+        start: datetime,
+    ) -> None:
+        if start.tzinfo is None:
+            raise ValueError("Manual Zoom folder start must be timezone-aware")
+        normalized_path = normalize_file_path(folder)
+        with closing(self._connect()) as connection:
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO zoom_folder_overrides (normalized_path, start)
+                    VALUES (?, ?)
+                    ON CONFLICT(normalized_path) DO UPDATE SET
+                        start=excluded.start
+                    """,
+                    (normalized_path, start.isoformat()),
+                )
+
+    def get_zoom_folder_starts(self) -> dict[str, datetime]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT normalized_path, start FROM zoom_folder_overrides"
+            ).fetchall()
+        return {
+            row["normalized_path"]: datetime.fromisoformat(row["start"])
+            for row in rows
+        }
 
     def save(self, lesson: Lesson) -> None:
         deliveries = [

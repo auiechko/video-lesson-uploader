@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import tkinter as tk
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -15,8 +16,9 @@ from typing import Any, Coroutine, Mapping
 from .calendar_rules import (
     BatchRevalidationRequired,
     CalendarEventSnapshot,
+    ParsedCalendarEvent,
+    build_calendar_snapshot,
     parse_calendar_event,
-    resolve_calendar_slots,
     validate_calendar_snapshots,
 )
 from .credentials import KeyringSecretStore
@@ -37,6 +39,13 @@ from .google_calendar import (
     calendar_event_to_lesson_form,
 )
 from .manifest import UploadManifest, load_manifest, save_manifest
+from .media_tools import (
+    boundary_preview_offsets,
+    extract_preview_frames,
+    general_preview_offsets,
+    probe_mp4,
+    split_mp4,
+)
 from .models import Lesson, LessonSendMode, SendStatus
 from .persistence import SQLiteSendItemRepository
 from .planning import plan_albums
@@ -46,10 +55,61 @@ from .telegram_desktop import (
     TelegramDesktopService,
     telethon_components,
 )
+from .workflow import (
+    WorkflowState,
+    WorkflowStateMachine,
+    WorkflowTransitionError,
+)
+from .zoom_batch import assemble_zoom_batch
+from .zoom_decisions import (
+    AssignmentType,
+    FileIdentity,
+    ZoomAssignmentDecision,
+)
+from .zoom_matching import (
+    ZoomMatchResult,
+    ZoomMatchSettings,
+    ZoomMatchStatus,
+    match_zoom_segments,
+)
+from .zoom_preflight import (
+    PreflightFolderResult,
+    PreflightSettings,
+    ZoomPreflightResult,
+    ZoomPreflightService,
+)
+from .zoom_recordings import (
+    VideoTimeConfidence,
+    VideoTimeMethod,
+    ZoomFolderIssue,
+    ZoomRecordingCatalog,
+    ZoomVideoSegment,
+)
+from .zoom_revalidation import validate_zoom_sources
 
 APP_TITLE = "Lesson Video Uploader"
 CONTROL_KEY_MASK = 0x0004
 VIRTUAL_KEY_V = 86
+
+
+def _format_seconds(value: float | None) -> str:
+    total = max(0, round(value or 0))
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02}:{minutes:02}:{seconds:02}"
+
+
+def _parse_offset(value: str) -> float:
+    parts = value.strip().split(":")
+    if len(parts) != 3:
+        raise ValueError("Час має формат ГГ:ХХ:СС")
+    try:
+        hours, minutes, seconds = (int(part) for part in parts)
+    except ValueError as error:
+        raise ValueError("Час має містити лише числа") from error
+    if hours < 0 or not 0 <= minutes < 60 or not 0 <= seconds < 60:
+        raise ValueError("Некоректна точка розрізання")
+    return float(hours * 3600 + minutes * 60 + seconds)
 
 
 def is_ctrl_v_shortcut(*, state: int | str, keycode: int) -> bool:
@@ -117,6 +177,17 @@ class DesktopApplication:
         self.pending_calendar_form: LessonForm | None = None
         self.lessons: list[Lesson] = []
         self.pending_video_paths: list[Path] = []
+        self.workflow = WorkflowStateMachine()
+        self.preflight_service = ZoomPreflightService()
+        self.preflight_result: ZoomPreflightResult | None = None
+        self.parsed_calendar_events: tuple[ParsedCalendarEvent, ...] = ()
+        self.zoom_match_results: list[ZoomMatchResult] = []
+        self.unresolved_zoom_results: list[ZoomMatchResult] = []
+        self.missing_zoom_events: list[ParsedCalendarEvent] = []
+        self.zoom_catalog_issues: list[ZoomFolderIssue] = []
+        self.manual_text_event_ids: set[str] = set()
+        self.ignored_event_ids: set[str] = set()
+        self.google_tree_event_index: dict[str, int] = {}
         self.busy = False
         self.action_buttons: list[ttk.Button] = []
 
@@ -166,6 +237,16 @@ class DesktopApplication:
         self.google_from_var = tk.StringVar(value=today)
         self.google_to_var = tk.StringVar(value=today)
         self.google_status_var = tk.StringVar(value="Google Calendar не підключений")
+        self.zoom_recordings_dir_var = tk.StringVar()
+        self.automatic_tolerance_var = tk.StringVar(value="30")
+        self.manual_window_var = tk.StringVar(value="180")
+        self.next_overlap_var = tk.StringVar(value="10")
+        self.minimum_video_size_var = tk.StringVar(value="5")
+        self.video_stability_var = tk.StringVar(value="5")
+        self.workflow_step_var = tk.StringVar(value=self.workflow.step_label)
+        self.unresolved_count_var = tk.StringVar(
+            value="Невирішених питань: 0"
+        )
 
     def _build_layout(self) -> None:
         outer = ttk.Frame(self.root, padding=18)
@@ -186,7 +267,7 @@ class DesktopApplication:
         google_tab = ttk.Frame(self.notebook, padding=14)
         settings_tab = ttk.Frame(self.notebook, padding=18)
         self.notebook.add(self.send_tab, text="  Уроки та надсилання  ")
-        self.notebook.add(google_tab, text="  Google Calendar  ")
+        self.notebook.add(google_tab, text="  Google Calendar і Zoom  ")
         self.notebook.add(settings_tab, text="  Telegram і безпека  ")
         self._build_send_tab(self.send_tab)
         self._build_google_tab(google_tab)
@@ -237,20 +318,20 @@ class DesktopApplication:
 
         actions = ttk.Frame(parent)
         actions.pack(fill=tk.X, pady=(12, 0))
-        send_button = ttk.Button(
+        self.send_button = ttk.Button(
             actions,
-            text="Надіслати пакет",
+            text="Надіслати в Telegram",
             style="Primary.TButton",
             command=self._send_package,
         )
-        send_button.pack(side=tk.LEFT)
+        self.send_button.pack(side=tk.LEFT)
         reconcile_button = ttk.Button(
             actions,
             text="Перевірити невідому доставку",
             command=self._reconcile_package,
         )
         reconcile_button.pack(side=tk.LEFT, padx=8)
-        self.action_buttons.extend((send_button, reconcile_button))
+        self.action_buttons.extend((self.send_button, reconcile_button))
 
         self.log = ScrolledText(
             parent,
@@ -448,17 +529,142 @@ class DesktopApplication:
             0,
             width=24,
         )
-        load_button = ttk.Button(
-            filters,
-            text="Завантажити події",
-            style="Primary.TButton",
-            command=self._load_google_events,
-        )
-        load_button.grid(row=2, column=3, sticky=tk.E, pady=5)
         filters.columnconfigure(1, weight=1)
         filters.columnconfigure(3, weight=1)
 
-        columns = ("start", "duration", "status", "summary", "event_id")
+        zoom = ttk.LabelFrame(
+            parent,
+            text="Локальні записи Zoom",
+            padding=10,
+        )
+        zoom.pack(fill=tk.X, pady=(12, 0))
+        ttk.Label(zoom, text="Папка записів Zoom").grid(
+            row=0,
+            column=0,
+            sticky=tk.W,
+            padx=(0, 6),
+            pady=5,
+        )
+        ttk.Entry(
+            zoom,
+            textvariable=self.zoom_recordings_dir_var,
+        ).grid(
+            row=0,
+            column=1,
+            columnspan=5,
+            sticky=tk.EW,
+            pady=5,
+        )
+        zoom_browse_button = ttk.Button(
+            zoom,
+            text="Вибрати папку…",
+            command=self._pick_zoom_recordings_dir,
+        )
+        zoom_browse_button.grid(row=0, column=6, padx=(8, 0), pady=5)
+        self._labeled_entry(
+            zoom,
+            "Авто, хв",
+            self.automatic_tolerance_var,
+            1,
+            0,
+            width=7,
+        )
+        self._labeled_entry(
+            zoom,
+            "Ручний пошук, хв",
+            self.manual_window_var,
+            1,
+            2,
+            width=7,
+        )
+        self._labeled_entry(
+            zoom,
+            "Overlap, хв",
+            self.next_overlap_var,
+            1,
+            4,
+            width=7,
+        )
+        self._labeled_entry(
+            zoom,
+            "Мін. MP4, МБ",
+            self.minimum_video_size_var,
+            2,
+            0,
+            width=7,
+        )
+        self._labeled_entry(
+            zoom,
+            "Стабільність, с",
+            self.video_stability_var,
+            2,
+            2,
+            width=7,
+        )
+        zoom.columnconfigure(1, weight=1)
+        zoom.columnconfigure(3, weight=1)
+        zoom.columnconfigure(5, weight=1)
+
+        workflow = ttk.LabelFrame(
+            parent,
+            text="Підготовка batch",
+            padding=10,
+        )
+        workflow.pack(fill=tk.X, pady=(12, 0))
+        ttk.Label(
+            workflow,
+            textvariable=self.workflow_step_var,
+            style="Subtitle.TLabel",
+        ).pack(side=tk.LEFT)
+        ttk.Label(
+            workflow,
+            textvariable=self.unresolved_count_var,
+        ).pack(side=tk.LEFT, padx=(16, 0))
+        self.preflight_button = ttk.Button(
+            workflow,
+            text="Перевірити конвертацію",
+            style="Primary.TButton",
+            command=self._start_zoom_preflight,
+        )
+        self.preflight_button.pack(side=tk.RIGHT)
+        self.matching_button = ttk.Button(
+            workflow,
+            text="Перевірити відповідність",
+            command=self._load_google_events,
+        )
+        self.matching_button.pack(side=tk.RIGHT, padx=6)
+        self.next_problem_button = ttk.Button(
+            workflow,
+            text="Перейти до наступної проблеми",
+            command=self._resolve_next_zoom_problem,
+        )
+        self.next_problem_button.pack(side=tk.RIGHT, padx=6)
+        self.change_decision_button = ttk.Button(
+            workflow,
+            text="Змінити рішення",
+            command=self._change_selected_zoom_decision,
+        )
+        self.change_decision_button.pack(side=tk.RIGHT, padx=6)
+        self.open_problems_button = ttk.Button(
+            workflow,
+            text="Відкрити проблемні папки",
+            command=self._show_preflight_problems,
+        )
+        self.open_problems_button.pack(side=tk.RIGHT, padx=6)
+
+        columns = (
+            "zoom_start",
+            "calendar_start",
+            "calendar_end",
+            "difference",
+            "video_end",
+            "next_event",
+            "overlap",
+            "method",
+            "status",
+            "student",
+            "event_id",
+        )
         self.google_event_tree = ttk.Treeview(
             parent,
             columns=columns,
@@ -466,21 +672,23 @@ class DesktopApplication:
             selectmode="browse",
             height=11,
         )
-        self.google_event_tree.heading("start", text="Початок")
-        self.google_event_tree.heading("duration", text="Год.")
+        self.google_event_tree.heading("zoom_start", text="Zoom start")
+        self.google_event_tree.heading("calendar_start", text="Calendar start")
+        self.google_event_tree.heading("calendar_end", text="Calendar end")
+        self.google_event_tree.heading("difference", text="Різниця")
+        self.google_event_tree.heading("video_end", text="Video end")
+        self.google_event_tree.heading("next_event", text="Наступний урок")
+        self.google_event_tree.heading("overlap", text="Overlap")
+        self.google_event_tree.heading("method", text="Метод")
         self.google_event_tree.heading("status", text="Статус")
-        self.google_event_tree.heading("summary", text="Назва події")
+        self.google_event_tree.heading("student", text="Учень")
         self.google_event_tree.heading("event_id", text="Google event ID")
-        self.google_event_tree.column("start", width=135, stretch=False)
-        self.google_event_tree.column(
-            "duration",
-            width=55,
-            anchor=tk.CENTER,
-            stretch=False,
-        )
-        self.google_event_tree.column("status", width=190, stretch=False)
-        self.google_event_tree.column("summary", width=360)
-        self.google_event_tree.column("event_id", width=180)
+        for column in columns:
+            self.google_event_tree.column(
+                column,
+                width=125 if column not in {"status", "student"} else 180,
+                stretch=column in {"status", "student"},
+            )
         self.google_event_tree.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
         self.google_event_tree.bind(
             "<Double-1>",
@@ -498,10 +706,16 @@ class DesktopApplication:
                 browse_button,
                 connect_button,
                 disconnect_button,
-                load_button,
+                zoom_browse_button,
+                self.preflight_button,
+                self.matching_button,
+                self.next_problem_button,
+                self.change_decision_button,
+                self.open_problems_button,
                 import_button,
             )
         )
+        self._apply_workflow_state()
 
     def _build_settings_tab(self, parent: ttk.Frame) -> None:
         intro = ttk.Label(
@@ -643,6 +857,20 @@ class DesktopApplication:
         self.google_credentials_var.set(config.google_client_secrets)
         self.google_calendar_var.set(config.google_calendar_id)
         self.google_timezone_var.set(config.google_timezone)
+        self.zoom_recordings_dir_var.set(config.zoom_recordings_dir)
+        self.automatic_tolerance_var.set(
+            str(config.automatic_time_tolerance_minutes)
+        )
+        self.manual_window_var.set(
+            str(config.manual_time_search_window_minutes)
+        )
+        self.next_overlap_var.set(
+            str(config.next_lesson_overlap_tolerance_minutes)
+        )
+        self.minimum_video_size_var.set(str(config.minimum_video_size_mb))
+        self.video_stability_var.set(
+            str(config.video_stability_check_seconds)
+        )
         self.secret_status_var.set(
             "API hash збережено"
             if loaded.api_hash_saved
@@ -657,12 +885,360 @@ class DesktopApplication:
         if selected:
             self.google_credentials_var.set(selected)
 
+    def _pick_zoom_recordings_dir(self) -> None:
+        selected = filedialog.askdirectory(
+            title="Виберіть кореневу папку локальних записів Zoom",
+            initialdir=self.zoom_recordings_dir_var.get() or None,
+        )
+        if selected and selected != self.zoom_recordings_dir_var.get():
+            self.zoom_recordings_dir_var.set(selected)
+            self._reset_zoom_workflow()
+
+    def _reset_zoom_workflow(self) -> None:
+        self.workflow = WorkflowStateMachine()
+        self.preflight_result = None
+        self.parsed_calendar_events = ()
+        self.zoom_match_results.clear()
+        self.unresolved_zoom_results.clear()
+        self.missing_zoom_events.clear()
+        self.zoom_catalog_issues.clear()
+        self.manual_text_event_ids.clear()
+        self.ignored_event_ids.clear()
+        self.google_event_tree.delete(
+            *self.google_event_tree.get_children()
+        )
+        self.google_tree_event_index.clear()
+        self._apply_workflow_state()
+
+    def _selected_period(self) -> tuple[date, date]:
+        try:
+            date_from = date.fromisoformat(self.google_from_var.get().strip())
+            date_to = date.fromisoformat(self.google_to_var.get().strip())
+        except ValueError as error:
+            raise ValueError("Дати мають формат РРРР-ММ-ДД") from error
+        if date_to < date_from:
+            raise ValueError("Кінцева дата не може бути раніше початкової")
+        return date_from, date_to
+
+    def _current_preflight_settings(self) -> PreflightSettings:
+        return PreflightSettings(
+            minimum_video_size_mb=float(self.minimum_video_size_var.get()),
+            video_stability_check_seconds=float(
+                self.video_stability_var.get()
+            ),
+            timezone_name=self.google_timezone_var.get().strip(),
+        )
+
+    def _current_match_settings(self) -> ZoomMatchSettings:
+        config = self.settings.load(self.profile_var.get()).config
+        return ZoomMatchSettings(
+            automatic_time_tolerance_minutes=(
+                config.automatic_time_tolerance_minutes
+            ),
+            manual_time_search_window_minutes=(
+                config.manual_time_search_window_minutes
+            ),
+            calendar_conflict_tolerance_minutes=(
+                config.calendar_conflict_tolerance_minutes
+            ),
+            next_lesson_overlap_tolerance_minutes=(
+                config.next_lesson_overlap_tolerance_minutes
+            ),
+        )
+
+    def _preflight_matches_current_selection(self) -> bool:
+        if self.preflight_result is None:
+            return False
+        try:
+            date_from, date_to = self._selected_period()
+        except ValueError:
+            return False
+        selected_root = (
+            Path(self.zoom_recordings_dir_var.get())
+            .expanduser()
+            .resolve()
+        )
+        return (
+            self.preflight_result.root.resolve() == selected_root
+            and self.preflight_result.date_from == date_from
+            and self.preflight_result.date_to == date_to
+        )
+
+    def _apply_workflow_state(self) -> None:
+        buttons = self.workflow.buttons
+        self.workflow_step_var.set(self.workflow.step_label)
+        unresolved_count = 0
+        if self.preflight_result is not None:
+            unresolved_count = len(self.preflight_result.blocking_folders)
+        if self.workflow.state in {
+            WorkflowState.MATCHING_RUNNING,
+            WorkflowState.RESOLUTION_REQUIRED,
+            WorkflowState.BATCH_READY,
+            WorkflowState.REVALIDATION_RUNNING,
+            WorkflowState.BATCH_REVALIDATION_REQUIRED,
+        }:
+            unresolved_count = (
+                len(self.unresolved_zoom_results)
+                + len(self.missing_zoom_events)
+                + len(self.zoom_catalog_issues)
+            )
+        self.unresolved_count_var.set(
+            f"Невирішених питань: {unresolved_count}"
+        )
+        if self.busy:
+            for button in (
+                self.preflight_button,
+                self.matching_button,
+                self.next_problem_button,
+                self.change_decision_button,
+                self.open_problems_button,
+                self.send_button,
+            ):
+                button.configure(state=tk.DISABLED)
+            return
+        self.preflight_button.configure(
+            state=(
+                tk.NORMAL
+                if buttons.preflight_enabled
+                else tk.DISABLED
+            ),
+            text=(
+                "Повторити перевірку"
+                if self.workflow.state is WorkflowState.PREFLIGHT_BLOCKED
+                else "Перевірити конвертацію"
+            ),
+        )
+        self.matching_button.configure(
+            state=tk.NORMAL if buttons.matching_enabled else tk.DISABLED
+        )
+        self.next_problem_button.configure(
+            state=tk.NORMAL if buttons.resolve_enabled else tk.DISABLED
+        )
+        self.change_decision_button.configure(
+            state=tk.NORMAL if buttons.resolve_enabled else tk.DISABLED
+        )
+        self.open_problems_button.configure(
+            state=(
+                tk.NORMAL
+                if buttons.open_problems_enabled
+                else tk.DISABLED
+            )
+        )
+        self.send_button.configure(
+            state=tk.NORMAL if buttons.send_enabled else tk.DISABLED
+        )
+
+    def _start_zoom_preflight(self) -> None:
+        try:
+            if not self._save_google_settings():
+                return
+            date_from, date_to = self._selected_period()
+            root = Path(self.zoom_recordings_dir_var.get()).expanduser()
+            settings = self._current_preflight_settings()
+            previous = self.preflight_result
+            recheck_only = (
+                self.workflow.state is WorkflowState.PREFLIGHT_BLOCKED
+                and previous is not None
+                and previous.root == root
+                and previous.date_from == date_from
+                and previous.date_to == date_to
+            )
+            self.workflow.start_preflight()
+        except (ValueError, WorkflowTransitionError) as error:
+            self._show_error(error)
+            return
+        self._apply_workflow_state()
+
+        async def run_preflight() -> ZoomPreflightResult:
+            if recheck_only and previous is not None:
+                return await asyncio.to_thread(
+                    self.preflight_service.recheck_blocked,
+                    previous,
+                    settings,
+                )
+            return await asyncio.to_thread(
+                self.preflight_service.check,
+                root,
+                date_from,
+                date_to,
+                settings,
+                manual_folder_starts=(
+                    self.calendar_report_repository.get_zoom_folder_starts()
+                ),
+            )
+
+        self._run_async(
+            run_preflight(),
+            self._preflight_finished,
+            "Перевірка конвертації Zoom…",
+        )
+
+    def _preflight_finished(self, result: ZoomPreflightResult) -> None:
+        self.preflight_result = result
+        self.workflow.finish_preflight(
+            has_blocking_problems=not result.is_passed
+        )
+        self._apply_workflow_state()
+        if result.is_passed:
+            self._log(
+                "Preflight пройдено: усі "
+                f"{len(result.ready_folders)} Zoom-папок готові."
+            )
+            messagebox.showinfo(
+                APP_TITLE,
+                "Усі записи технічно готові. "
+                "Тепер натисніть «Перевірити відповідність».",
+            )
+            return
+        self._log(
+            "PREFLIGHT_BLOCKED: проблемних папок "
+            f"{len(result.blocking_folders)} із {len(result.folders)}."
+        )
+        self._show_preflight_problems()
+
+    def _show_preflight_problems(self) -> None:
+        if (
+            self.preflight_result is None
+            or not self.preflight_result.blocking_folders
+        ):
+            messagebox.showinfo(APP_TITLE, "Проблемних Zoom-папок немає.")
+            return
+        problems = self.preflight_result.blocking_folders
+        window = tk.Toplevel(self.root)
+        window.title("Проблеми конвертації Zoom")
+        window.geometry("1120x480")
+        window.transient(self.root)
+        columns = ("date", "time", "path", "status", "files", "reason", "action")
+        tree = ttk.Treeview(
+            window,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+        )
+        headings = {
+            "date": "Дата",
+            "time": "Час Zoom",
+            "path": "Повний шлях",
+            "status": "Статус",
+            "files": "Знайдені файли",
+            "reason": "Причина",
+            "action": "Рекомендована дія",
+        }
+        for column, heading in headings.items():
+            tree.heading(column, text=heading)
+            tree.column(
+                column,
+                width=100 if column in {"date", "time"} else 190,
+            )
+        for index, problem in enumerate(problems):
+            tree.insert(
+                "",
+                tk.END,
+                iid=str(index),
+                values=(
+                    problem.start.strftime("%d.%m.%Y"),
+                    problem.start.strftime("%H:%M:%S"),
+                    str(problem.folder),
+                    problem.status.value,
+                    ", ".join(path.name for path in problem.found_files),
+                    problem.reason,
+                    problem.recommended_action,
+                ),
+            )
+        tree.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        buttons = ttk.Frame(window, padding=(12, 0, 12, 12))
+        buttons.pack(fill=tk.X)
+
+        def selected_problem() -> PreflightFolderResult | None:
+            selection = tree.selection()
+            return problems[int(selection[0])] if selection else None
+
+        def open_selected_problem() -> None:
+            problem = selected_problem()
+            self._open_local_path(
+                problem.folder if problem is not None else None
+            )
+
+        def open_all_problems() -> None:
+            for problem in problems:
+                self._open_local_path(problem.folder)
+
+        def retry_preflight() -> None:
+            window.destroy()
+            self._start_zoom_preflight()
+
+        ttk.Button(
+            buttons,
+            text="Відкрити папку",
+            command=open_selected_problem,
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            buttons,
+            text="Відкрити всі проблемні папки",
+            command=open_all_problems,
+        ).pack(side=tk.LEFT, padx=6)
+        ttk.Button(
+            buttons,
+            text="Повторити перевірку",
+            command=retry_preflight,
+        ).pack(side=tk.LEFT, padx=6)
+        ttk.Button(
+            buttons,
+            text="Перейти до наступної проблеми",
+            command=lambda: self._select_next_tree_item(tree),
+        ).pack(side=tk.LEFT, padx=6)
+        ttk.Button(
+            buttons,
+            text="Закрити",
+            command=window.destroy,
+        ).pack(side=tk.RIGHT)
+        tree.selection_set("0")
+        window.grab_set()
+
+    @staticmethod
+    def _select_next_tree_item(tree: ttk.Treeview) -> None:
+        items = tree.get_children()
+        if not items:
+            return
+        selection = tree.selection()
+        index = (
+            (items.index(selection[0]) + 1) % len(items)
+            if selection
+            else 0
+        )
+        tree.selection_set(items[index])
+        tree.see(items[index])
+
+    def _open_local_path(self, path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            os.startfile(path)  # type: ignore[attr-defined]
+        except OSError as error:
+            self._show_error(error)
+
     def _save_google_settings(self) -> bool:
         try:
             self.settings.save_google_calendar(
                 client_secrets=self.google_credentials_var.get(),
                 calendar_id=self._selected_google_calendar_id(),
                 timezone_name=self.google_timezone_var.get(),
+                zoom_recordings_dir=self.zoom_recordings_dir_var.get(),
+                automatic_time_tolerance_minutes=int(
+                    self.automatic_tolerance_var.get()
+                ),
+                manual_time_search_window_minutes=int(
+                    self.manual_window_var.get()
+                ),
+                next_lesson_overlap_tolerance_minutes=int(
+                    self.next_overlap_var.get()
+                ),
+                minimum_video_size_mb=float(
+                    self.minimum_video_size_var.get()
+                ),
+                video_stability_check_seconds=float(
+                    self.video_stability_var.get()
+                ),
                 profile_id=self.profile_var.get(),
             )
         except Exception as error:
@@ -737,21 +1313,35 @@ class DesktopApplication:
         return calendar.id if calendar is not None else selected
 
     def _load_google_events(self) -> None:
+        if self.workflow.state is not WorkflowState.PREFLIGHT_PASSED:
+            self._show_error(
+                WorkflowTransitionError(
+                    "Спочатку успішно виконайте «Перевірити конвертацію»."
+                )
+            )
+            return
+        if not self._preflight_matches_current_selection():
+            self._show_error(
+                WorkflowTransitionError(
+                    "Папка Zoom або діапазон дат змінилися після preflight. "
+                    "Повторіть перевірку конвертації."
+                )
+            )
+            return
         if self.google_service is None:
             self._show_error(
                 ValueError("Спочатку натисніть «Підключити Google».")
             )
             return
         try:
-            date_from = date.fromisoformat(self.google_from_var.get().strip())
-            date_to = date.fromisoformat(self.google_to_var.get().strip())
-        except ValueError:
-            self._show_error(
-                ValueError("Дати мають формат РРРР-ММ-ДД")
-            )
+            date_from, date_to = self._selected_period()
+            if not self._save_google_settings():
+                return
+            self.workflow.start_matching()
+        except (ValueError, WorkflowTransitionError) as error:
+            self._show_error(error)
             return
-        if not self._save_google_settings():
-            return
+        self._apply_workflow_state()
         calendar_id = self._selected_google_calendar_id()
         timezone_name = self.google_timezone_var.get().strip()
 
@@ -777,60 +1367,1015 @@ class DesktopApplication:
     ) -> None:
         self.google_events = list(events)
         self.google_event_tree.delete(*self.google_event_tree.get_children())
+        self.google_tree_event_index.clear()
         timezone_name = self.google_timezone_var.get().strip()
-        parsed_events = [
+        parsed_events = tuple(
             parse_calendar_event(event, timezone_name=timezone_name)
             for event in events
-        ]
+        )
+        self.parsed_calendar_events = parsed_events
         for parsed in parsed_events:
             self.calendar_report_repository.save_calendar_event_report(parsed)
-        manual_event_ids = {
-            candidate.event_id
-            for slot in resolve_calendar_slots(
-                parsed_events,
-                tolerance_minutes=(
-                    self.settings.load().config
-                    .calendar_conflict_tolerance_minutes
+        try:
+            if self.preflight_result is None or not self.preflight_result.is_passed:
+                raise WorkflowTransitionError(
+                    "Matching заборонено без успішного preflight."
+                )
+            metadata_by_path = {
+                video: metadata
+                for folder in self.preflight_result.ready_folders
+                for video, metadata in zip(
+                    folder.video_paths,
+                    folder.metadata,
+                    strict=True,
+                )
+            }
+            catalog = ZoomRecordingCatalog.scan(
+                self.preflight_result.root,
+                timezone_name=timezone_name,
+                metadata_probe=metadata_by_path.__getitem__,
+                manual_folder_starts=(
+                    self.calendar_report_repository.get_zoom_folder_starts()
                 ),
+                date_from=self.preflight_result.date_from,
+                date_to=self.preflight_result.date_to,
             )
-            if slot.status is not None
-            and slot.status.value == "MANUAL_SELECTION_REQUIRED"
-            for candidate in slot.candidates
-        }
-        for index, (event, parsed) in enumerate(
-            zip(events, parsed_events, strict=True)
-        ):
-            display_status = (
-                "MANUAL_SELECTION_REQUIRED"
-                if event.id in manual_event_ids
-                else (
-                    f"{parsed.status.value} / "
-                    f"{parsed.cancellation_source.value}"
-                    if parsed.cancellation_source is not None
-                    else parsed.status.value
+            ready_paths = {
+                folder.folder
+                for folder in self.preflight_result.ready_folders
+            }
+            segments = tuple(
+                segment
+                for folder in catalog.folders
+                if folder.path in ready_paths
+                for segment in folder.segments
+            )
+            results = list(
+                match_zoom_segments(
+                    segments,
+                    parsed_events,
+                    settings=self._current_match_settings(),
                 )
             )
+            for index, result in enumerate(results):
+                if result.is_resolved or result.event is None:
+                    continue
+                decision = (
+                    self.calendar_report_repository
+                    .get_valid_zoom_decision(
+                        result.segment,
+                        result.event,
+                    )
+                )
+                if decision is not None and decision.assignment_type not in {
+                    AssignmentType.DEFERRED,
+                }:
+                    results[index] = replace(
+                        result,
+                        status=ZoomMatchStatus.MANUALLY_CONFIRMED,
+                        reason=(
+                            "Використано збережене ручне рішення: "
+                            f"{decision.reason}"
+                        ),
+                    )
+            assembly = assemble_zoom_batch(
+                parsed_events,
+                tuple(results),
+                profile_id=self.profile_var.get().strip(),
+                batch_id=self.batch_var.get().strip(),
+                manual_text_event_ids=frozenset(
+                    self.manual_text_event_ids
+                ),
+                ignored_event_ids=frozenset(self.ignored_event_ids),
+            )
+        except Exception:
+            if self.workflow.state is WorkflowState.MATCHING_RUNNING:
+                self.workflow.finish_matching(
+                    has_unresolved_problems=True
+                )
+                self._apply_workflow_state()
+            raise
+
+        self.zoom_match_results = results
+        self.unresolved_zoom_results = list(assembly.unresolved_results)
+        self.missing_zoom_events = list(assembly.missing_events)
+        self.zoom_catalog_issues = list(catalog.issues)
+        self.lessons = list(assembly.lessons)
+        unresolved_count = (
+            len(self.unresolved_zoom_results)
+            + len(self.missing_zoom_events)
+            + len(self.zoom_catalog_issues)
+        )
+        self.workflow.finish_matching(
+            has_unresolved_problems=unresolved_count > 0
+        )
+        self._render_zoom_matching_tree()
+        self._refresh_lessons()
+        self._apply_workflow_state()
+        self.google_status_var.set(
+            f"Calendar: {len(events)}; Zoom-сегментів: {len(results)}"
+        )
+        self._log(
+            f"Matching завершено. Невирішених питань: {unresolved_count}."
+        )
+        if unresolved_count == 0:
+            messagebox.showinfo(
+                APP_TITLE,
+                "Усі записи перевірено. Невирішених питань: 0.",
+            )
+
+    def _render_zoom_matching_tree(self) -> None:
+        self.google_event_tree.delete(*self.google_event_tree.get_children())
+        self.google_tree_event_index.clear()
+        event_index = {
+            event.id: index for index, event in enumerate(self.google_events)
+        }
+        for index, result in enumerate(self.zoom_match_results):
+            event = result.event
+            next_event = result.next_event
+            iid = f"zoom-{index}"
+            if event is not None and event.event_id in event_index:
+                self.google_tree_event_index[iid] = event_index[event.event_id]
             self.google_event_tree.insert(
+                "",
+                tk.END,
+                iid=iid,
+                values=(
+                    result.segment.estimated_start.strftime(
+                        "%d.%m.%Y %H:%M:%S"
+                    ),
+                    event.start.strftime("%H:%M") if event else "—",
+                    event.end.strftime("%H:%M") if event else "—",
+                    (
+                        f"{result.start_difference_minutes:g} хв"
+                        if result.start_difference_minutes is not None
+                        else "—"
+                    ),
+                    result.segment.estimated_end.strftime("%H:%M:%S"),
+                    (
+                        f"{next_event.start:%H:%M} "
+                        f"{next_event.student_name}"
+                        if next_event
+                        else "—"
+                    ),
+                    (
+                        f"{result.next_overlap_seconds / 60:.1f} хв"
+                        if result.next_overlap_seconds
+                        else "0"
+                    ),
+                    result.segment.time_method.value,
+                    result.status.value,
+                    (
+                        f"{event.student_id} {event.student_name} "
+                        f"{event.student_age or ''}р"
+                        if event
+                        else "—"
+                    ),
+                    event.event_id if event else "—",
+                ),
+            )
+        for index, event in enumerate(self.missing_zoom_events):
+            iid = f"missing-{index}"
+            if event.event_id in event_index:
+                self.google_tree_event_index[iid] = event_index[event.event_id]
+            self.google_event_tree.insert(
+                "",
+                tk.END,
+                iid=iid,
+                values=(
+                    "—",
+                    event.start.strftime("%d.%m.%Y %H:%M"),
+                    event.end.strftime("%H:%M"),
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "ZOOM_FOLDER_NOT_FOUND",
+                    f"{event.student_id} {event.student_name}",
+                    event.event_id,
+                ),
+            )
+        for index, issue in enumerate(self.zoom_catalog_issues):
+            self.google_event_tree.insert(
+                "",
+                tk.END,
+                iid=f"parse-{index}",
+                values=(
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    issue.status.value,
+                    issue.path.name,
+                    "—",
+                ),
+            )
+
+    def _resolve_next_zoom_problem(self) -> None:
+        if self.workflow.state is not WorkflowState.RESOLUTION_REQUIRED:
+            messagebox.showinfo(APP_TITLE, "Невирішених питань немає.")
+            return
+        if self.zoom_catalog_issues:
+            issue = self.zoom_catalog_issues[0]
+            value = simpledialog.askstring(
+                "Введіть дату й час Zoom",
+                (
+                    f"{issue.reason}\n{issue.path}\n\n"
+                    "Введіть локальний час у форматі РРРР-ММ-ДД ГГ:ХХ:СС:"
+                ),
+                parent=self.root,
+            )
+            if not value:
+                return
+            try:
+                parsed = datetime.fromisoformat(value.strip())
+                timezone_name = self.google_timezone_var.get().strip()
+                from zoneinfo import ZoneInfo
+
+                aware = parsed.replace(tzinfo=ZoneInfo(timezone_name))
+                self.calendar_report_repository.save_zoom_folder_start(
+                    issue.path,
+                    aware,
+                )
+            except Exception as error:
+                self._show_error(error)
+                return
+            self._log(
+                "Ручний час Zoom-папки збережено. "
+                "Повторіть preflight для технічної перевірки."
+            )
+            self._restart_workflow_preflight()
+            return
+        if self.missing_zoom_events:
+            self._resolve_missing_zoom_event(self.missing_zoom_events[0])
+            return
+        if self.unresolved_zoom_results:
+            self._show_zoom_conflict_dialog(
+                self.unresolved_zoom_results[0]
+            )
+            return
+        self._rebuild_zoom_batch_after_resolution()
+
+    def _change_selected_zoom_decision(self) -> None:
+        selection = self.google_event_tree.selection()
+        if not selection:
+            self._resolve_next_zoom_problem()
+            return
+        item_id = selection[0]
+        if item_id.startswith("zoom-"):
+            self._show_zoom_conflict_dialog(
+                self.zoom_match_results[int(item_id.removeprefix("zoom-"))]
+            )
+            return
+        if item_id.startswith("missing-"):
+            self._resolve_missing_zoom_event(
+                self.missing_zoom_events[
+                    int(item_id.removeprefix("missing-"))
+                ]
+            )
+            return
+        self._resolve_next_zoom_problem()
+
+    def _resolve_missing_zoom_event(
+        self,
+        event: ParsedCalendarEvent,
+    ) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Zoom-папку не знайдено")
+        window.transient(self.root)
+        ttk.Label(
+            window,
+            text=(
+                f"{event.start:%d.%m.%Y %H:%M–}{event.end:%H:%M}\n"
+                f"{event.student_id} {event.student_name} "
+                f"{event.student_age or ''}р\n\n"
+                "Оберіть явне рішення. Закриття вікна залишає "
+                "питання невирішеним."
+            ),
+            justify=tk.LEFT,
+            padding=16,
+        ).pack(fill=tk.X)
+        buttons = ttk.Frame(window, padding=16)
+        buttons.pack(fill=tk.X)
+        ttk.Button(
+            buttons,
+            text="Вказати MP4 вручну",
+            command=lambda: self._attach_manual_mp4(event, window),
+        ).pack(fill=tk.X, pady=3)
+        ttk.Button(
+            buttons,
+            text="Вказати Zoom-папку вручну",
+            command=lambda: self._attach_manual_zoom_folder(
+                event,
+                window,
+            ),
+        ).pack(fill=tk.X, pady=3)
+        ttk.Button(
+            buttons,
+            text="Позначити урок як проведений без запису",
+            command=lambda: self._resolve_missing_as_text(event, window),
+        ).pack(fill=tk.X, pady=3)
+        ttk.Button(
+            buttons,
+            text="Позначити, що урок не проводився",
+            command=lambda: self._resolve_missing_as_not_conducted(
+                event,
+                window,
+            ),
+        ).pack(fill=tk.X, pady=3)
+        ttk.Button(
+            buttons,
+            text="Відкласти рішення",
+            command=window.destroy,
+        ).pack(fill=tk.X, pady=3)
+        window.grab_set()
+
+    def _attach_manual_mp4(
+        self,
+        event: ParsedCalendarEvent,
+        window: tk.Toplevel,
+    ) -> None:
+        selected = filedialog.askopenfilename(
+            title=(
+                f"Вкажіть MP4 для {event.start:%d.%m.%Y %H:%M} "
+                f"{event.student_name}"
+            ),
+            filetypes=[("MP4 відео", "*.mp4")],
+        )
+        if not selected:
+            return
+        try:
+            result = self._manual_zoom_result(
+                event,
+                Path(selected),
+                estimated_start=event.start,
+            )
+        except Exception as error:
+            self._show_error(error)
+            return
+        self.zoom_match_results.append(result)
+        self._save_zoom_decision(
+            result,
+            AssignmentType.MANUALLY_SELECTED_EVENT,
+            "MP4 вибрано вручну для події без знайденої Zoom-папки.",
+        )
+        window.destroy()
+        self._rebuild_zoom_batch_after_resolution()
+
+    def _attach_manual_zoom_folder(
+        self,
+        event: ParsedCalendarEvent,
+        window: tk.Toplevel,
+    ) -> None:
+        selected = filedialog.askdirectory(
+            title=(
+                f"Вкажіть Zoom-папку для "
+                f"{event.start:%d.%m.%Y %H:%M}"
+            )
+        )
+        if not selected:
+            return
+        folder = Path(selected)
+        paths = tuple(
+            sorted(
+                (
+                    path
+                    for path in folder.iterdir()
+                    if (
+                        path.is_file()
+                        and path.name.casefold().startswith("video")
+                        and path.suffix.casefold() == ".mp4"
+                    )
+                ),
+                key=lambda path: path.name.casefold(),
+            )
+        )
+        if not paths:
+            self._show_error(
+                ValueError("У вибраній папці немає video*.mp4")
+            )
+            return
+        results: list[ZoomMatchResult] = []
+        estimated_start = event.start
+        try:
+            for path in paths:
+                result = self._manual_zoom_result(
+                    event,
+                    path,
+                    estimated_start=estimated_start,
+                    sequence_number=len(results) + 1,
+                )
+                results.append(result)
+                estimated_start = result.segment.estimated_end
+        except Exception as error:
+            self._show_error(error)
+            return
+        for result in results:
+            self.zoom_match_results.append(result)
+            self._save_zoom_decision(
+                result,
+                AssignmentType.MANUALLY_SELECTED_EVENT,
+                "Zoom-папку вибрано користувачем вручну.",
+            )
+        window.destroy()
+        self._rebuild_zoom_batch_after_resolution()
+
+    @staticmethod
+    def _manual_zoom_result(
+        event: ParsedCalendarEvent,
+        path: Path,
+        *,
+        estimated_start: datetime,
+        sequence_number: int = 1,
+    ) -> ZoomMatchResult:
+        metadata = probe_mp4(path)
+        if not metadata.has_video_stream or metadata.duration_seconds <= 0:
+            raise ValueError("Обраний MP4 не має валідного відеопотоку")
+        segment = ZoomVideoSegment(
+            source_folder=path.parent,
+            path=path,
+            sequence_number=sequence_number,
+            duration_seconds=metadata.duration_seconds,
+            estimated_start=estimated_start,
+            estimated_end=(
+                estimated_start
+                + timedelta(seconds=metadata.duration_seconds)
+            ),
+            time_method=VideoTimeMethod.MANUALLY_CONFIRMED,
+            confidence=VideoTimeConfidence.HIGH,
+            file_size=path.stat().st_size,
+        )
+        return ZoomMatchResult(
+            segment=segment,
+            status=ZoomMatchStatus.MANUALLY_CONFIRMED,
+            event=event,
+            candidates=(),
+            start_difference_minutes=abs(
+                (estimated_start - event.start).total_seconds()
+            )
+            / 60,
+            reason="MP4 вибрано користувачем вручну.",
+        )
+
+    def _resolve_missing_as_text(
+        self,
+        event: ParsedCalendarEvent,
+        window: tk.Toplevel,
+    ) -> None:
+        self.manual_text_event_ids.add(event.event_id)
+        self.ignored_event_ids.discard(event.event_id)
+        window.destroy()
+        self._rebuild_zoom_batch_after_resolution()
+
+    def _resolve_missing_as_not_conducted(
+        self,
+        event: ParsedCalendarEvent,
+        window: tk.Toplevel,
+    ) -> None:
+        self.ignored_event_ids.add(event.event_id)
+        self.manual_text_event_ids.discard(event.event_id)
+        window.destroy()
+        self._rebuild_zoom_batch_after_resolution()
+
+    def _show_zoom_conflict_dialog(
+        self,
+        result: ZoomMatchResult,
+    ) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Підтвердьте відповідність часу")
+        window.geometry("980x760")
+        window.transient(self.root)
+        window.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: self._defer_zoom_result(result, window),
+        )
+        event = result.event
+        details = [
+            f"Zoom-папка: {result.segment.source_folder}",
+            f"Файл: {result.segment.path.name}",
+            f"Zoom start: {result.segment.estimated_start:%d.%m.%Y %H:%M:%S}",
+            f"Video end: {result.segment.estimated_end:%H:%M:%S}",
+            f"Статус: {result.status.value}",
+            f"Причина: {result.reason}",
+        ]
+        if event is not None:
+            details.extend([
+                f"Calendar: {event.start:%H:%M}–{event.end:%H:%M}",
+                (
+                    f"Учень: {event.student_id} {event.student_name} "
+                    f"{event.student_age or ''}р {event.lesson_type}"
+                ),
+                (
+                    "Різниця: "
+                    f"{result.start_difference_minutes:g} хв"
+                    if result.start_difference_minutes is not None
+                    else "Різниця: —"
+                ),
+            ])
+        ttk.Label(
+            window,
+            text="\n".join(details),
+            justify=tk.LEFT,
+            wraplength=920,
+        ).pack(fill=tk.X, padx=16, pady=12)
+        preview = ttk.Frame(window)
+        preview.pack(fill=tk.BOTH, expand=True, padx=16, pady=8)
+        images: list[tk.PhotoImage] = []
+        try:
+            offsets = (
+                boundary_preview_offsets(
+                    result.segment.duration_seconds,
+                    boundary_seconds=result.split_offset_seconds,
+                )
+                if result.split_offset_seconds is not None
+                else general_preview_offsets(
+                    result.segment.duration_seconds
+                )
+            )
+            frames = extract_preview_frames(
+                result.segment.path,
+                offsets,
+                output_dir=(
+                    self.workspace
+                    / ".lesson-video-uploader"
+                    / "previews"
+                    / result.segment.path.stem
+                ),
+            )
+            for index, (frame, offset) in enumerate(
+                zip(frames, offsets, strict=True)
+            ):
+                cell = ttk.Frame(preview, padding=4)
+                cell.grid(
+                    row=index // 2,
+                    column=index % 2,
+                    sticky=tk.NSEW,
+                )
+                image = tk.PhotoImage(file=frame)
+                images.append(image)
+                ttk.Label(cell, image=image).pack()
+                ttk.Label(
+                    cell,
+                    text=f"{_format_seconds(offset)}",
+                ).pack()
+                ttk.Button(
+                    cell,
+                    text="Переглянути біля цього моменту",
+                    command=partial(
+                        self._open_local_path,
+                        result.segment.path,
+                    ),
+                ).pack()
+            setattr(window, "_preview_images", images)
+            preview.columnconfigure(0, weight=1)
+            preview.columnconfigure(1, weight=1)
+            preview.rowconfigure(0, weight=1)
+            preview.rowconfigure(1, weight=1)
+        except Exception as error:
+            ttk.Label(
+                preview,
+                text=f"Preview-кадри недоступні: {error}",
+                foreground="#a00000",
+            ).pack()
+
+        buttons = ttk.Frame(window, padding=12)
+        buttons.pack(fill=tk.X)
+        if event is not None:
+            ttk.Button(
+                buttons,
+                text="Так, це цей урок",
+                style="Primary.TButton",
+                command=lambda: self._confirm_zoom_result(
+                    result,
+                    event,
+                    AssignmentType.MANUALLY_CONFIRMED_TIME,
+                    "Відповідність часу підтверджена користувачем.",
+                    window,
+                ),
+            ).pack(side=tk.LEFT, padx=3, pady=3)
+        ttk.Button(
+            buttons,
+            text="Обрати інший урок",
+            command=lambda: self._choose_other_calendar_event(
+                result,
+                window,
+            ),
+        ).pack(side=tk.LEFT, padx=3, pady=3)
+        if result.next_event is not None:
+            ttk.Button(
+                buttons,
+                text="Усе відео поточному учню",
+                command=lambda: self._confirm_zoom_result(
+                    result,
+                    event,
+                    AssignmentType.CURRENT_EVENT_FULL_VIDEO,
+                    "Користувач залишив усе відео поточному учню.",
+                    window,
+                ),
+            ).pack(side=tk.LEFT, padx=3, pady=3)
+            ttk.Button(
+                buttons,
+                text="Усе відео наступному учню",
+                command=lambda: self._confirm_zoom_result(
+                    result,
+                    result.next_event,
+                    AssignmentType.NEXT_EVENT,
+                    "Користувач прив’язав усе відео до наступного уроку.",
+                    window,
+                ),
+            ).pack(side=tk.LEFT, padx=3, pady=3)
+            ttk.Button(
+                buttons,
+                text="Розрізати за календарем",
+                command=lambda: self._split_zoom_conflict(
+                    result,
+                    result.split_offset_seconds,
+                    window,
+                ),
+            ).pack(side=tk.LEFT, padx=3, pady=3)
+            ttk.Button(
+                buttons,
+                text="Змінити точку розрізання",
+                command=lambda: self._ask_custom_split(
+                    result,
+                    window,
+                ),
+            ).pack(side=tk.LEFT, padx=3, pady=3)
+        ttk.Button(
+            buttons,
+            text="Це не урок",
+            command=lambda: self._resolve_without_event(
+                result,
+                ZoomMatchStatus.NOT_A_LESSON,
+                window,
+            ),
+        ).pack(side=tk.LEFT, padx=3, pady=3)
+        ttk.Button(
+            buttons,
+            text="Пропустити",
+            command=lambda: self._resolve_without_event(
+                result,
+                ZoomMatchStatus.SKIPPED_BY_USER,
+                window,
+            ),
+        ).pack(side=tk.LEFT, padx=3, pady=3)
+        ttk.Button(
+            buttons,
+            text="Відкласти рішення",
+            command=lambda: self._defer_zoom_result(result, window),
+        ).pack(side=tk.LEFT, padx=3, pady=3)
+        ttk.Button(
+            buttons,
+            text="Відкрити відео",
+            command=lambda: self._open_local_path(result.segment.path),
+        ).pack(side=tk.RIGHT, padx=3)
+        ttk.Button(
+            buttons,
+            text="Відкрити Zoom-папку",
+            command=lambda: self._open_local_path(
+                result.segment.source_folder
+            ),
+        ).pack(side=tk.RIGHT, padx=3)
+        window.grab_set()
+
+    def _choose_other_calendar_event(
+        self,
+        result: ZoomMatchResult,
+        parent: tk.Toplevel,
+    ) -> None:
+        candidates = tuple(
+            event
+            for event in self.parsed_calendar_events
+            if (
+                event.requires_video
+                and abs(
+                    (
+                        event.start - result.segment.estimated_start
+                    ).total_seconds()
+                )
+                <= int(self.manual_window_var.get()) * 60
+            )
+        )
+        if not candidates:
+            messagebox.showinfo(
+                APP_TITLE,
+                "У межах ручного вікна немає проведених уроків.",
+            )
+            return
+        chooser = tk.Toplevel(parent)
+        chooser.title("Обрати інший урок")
+        columns = ("start", "end", "difference", "student", "type", "title")
+        tree = ttk.Treeview(
+            chooser,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+        )
+        for column in columns:
+            tree.heading(column, text=column)
+            tree.column(column, width=150)
+        for index, event in enumerate(candidates):
+            tree.insert(
                 "",
                 tk.END,
                 iid=str(index),
                 values=(
-                    parsed.start.strftime("%d.%m.%Y %H:%M"),
-                    parsed.duration_hours,
-                    display_status,
-                    event.summary,
-                    event.id,
+                    event.start.strftime("%d.%m.%Y %H:%M"),
+                    event.end.strftime("%H:%M"),
+                    (
+                        f"{abs((event.start - result.segment.estimated_start).total_seconds()) / 60:.1f}"
+                    ),
+                    f"{event.student_id} {event.student_name} {event.student_age}р",
+                    event.status.value,
+                    event.original_summary,
                 ),
             )
-        self.google_status_var.set(f"Завантажено подій: {len(events)}")
-        self._log(f"Google Calendar: завантажено {len(events)} подій.")
+        tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        def choose() -> None:
+            selection = tree.selection()
+            if not selection:
+                return
+            event = candidates[int(selection[0])]
+            chooser.destroy()
+            self._confirm_zoom_result(
+                result,
+                event,
+                AssignmentType.MANUALLY_SELECTED_EVENT,
+                "Користувач обрав іншу Calendar event.",
+                parent,
+            )
+
+        ttk.Button(
+            chooser,
+            text="Обрати",
+            style="Primary.TButton",
+            command=choose,
+        ).pack(pady=(0, 10))
+        tree.selection_set("0")
+        chooser.grab_set()
+
+    def _confirm_zoom_result(
+        self,
+        result: ZoomMatchResult,
+        event: ParsedCalendarEvent | None,
+        assignment_type: AssignmentType,
+        reason: str,
+        window: tk.Toplevel,
+    ) -> None:
+        if event is None:
+            return
+        index = self.zoom_match_results.index(result)
+        resolved = replace(
+            result,
+            status=ZoomMatchStatus.MANUALLY_CONFIRMED,
+            event=event,
+            reason=reason,
+        )
+        self.zoom_match_results[index] = resolved
+        self._save_zoom_decision(resolved, assignment_type, reason)
+        window.destroy()
+        self._rebuild_zoom_batch_after_resolution()
+
+    def _save_zoom_decision(
+        self,
+        result: ZoomMatchResult,
+        assignment_type: AssignmentType,
+        reason: str,
+        *,
+        split_point: float | None = None,
+    ) -> None:
+        if result.event is None:
+            return
+        self.calendar_report_repository.save_zoom_decision(
+            ZoomAssignmentDecision(
+                file_identity=FileIdentity.from_segment(result.segment),
+                calendar_event_id=result.event.event_id,
+                event_start_utc=result.event.start.astimezone(timezone.utc),
+                assignment_type=assignment_type,
+                confirmed_by=self.profile_var.get().strip(),
+                confirmed_at=datetime.now(timezone.utc),
+                reason=reason,
+                manual_split_point_seconds=split_point,
+            )
+        )
+
+    def _resolve_without_event(
+        self,
+        result: ZoomMatchResult,
+        status: ZoomMatchStatus,
+        window: tk.Toplevel,
+    ) -> None:
+        index = self.zoom_match_results.index(result)
+        self.zoom_match_results[index] = replace(
+            result,
+            status=status,
+            event=None,
+            reason="Користувач виключив відео з batch.",
+        )
+        window.destroy()
+        self._rebuild_zoom_batch_after_resolution()
+
+    def _defer_zoom_result(
+        self,
+        result: ZoomMatchResult,
+        window: tk.Toplevel,
+    ) -> None:
+        index = self.zoom_match_results.index(result)
+        self.zoom_match_results[index] = replace(
+            result,
+            status=ZoomMatchStatus.DEFERRED,
+            reason="Рішення відкладено користувачем.",
+        )
+        window.destroy()
+        self._rebuild_zoom_batch_after_resolution()
+
+    def _ask_custom_split(
+        self,
+        result: ZoomMatchResult,
+        window: tk.Toplevel,
+    ) -> None:
+        raw = simpledialog.askstring(
+            APP_TITLE,
+            "Точка розрізання від початку відео (ГГ:ХХ:СС):",
+            initialvalue=(
+                _format_seconds(result.split_offset_seconds)
+                if result.split_offset_seconds is not None
+                else "00:30:00"
+            ),
+            parent=window,
+        )
+        if not raw:
+            return
+        try:
+            offset = _parse_offset(raw)
+        except ValueError as error:
+            self._show_error(error)
+            return
+        self._split_zoom_conflict(result, offset, window)
+
+    def _split_zoom_conflict(
+        self,
+        result: ZoomMatchResult,
+        offset: float | None,
+        window: tk.Toplevel,
+    ) -> None:
+        if (
+            offset is None
+            or result.event is None
+            or result.next_event is None
+        ):
+            self._show_error(ValueError("Немає коректної точки розрізання"))
+            return
+        try:
+            before_path, after_path = split_mp4(
+                result.segment.path,
+                split_offset_seconds=offset,
+                output_dir=(
+                    self.workspace
+                    / ".lesson-video-uploader"
+                    / "splits"
+                    / result.segment.path.stem
+                ),
+            )
+            after_duration = result.segment.duration_seconds - offset
+            if after_duration <= 0:
+                raise ValueError("Точка розрізання поза межами відео")
+            before_segment = replace(
+                result.segment,
+                path=before_path,
+                duration_seconds=offset,
+                estimated_end=(
+                    result.segment.estimated_start
+                    + timedelta(seconds=offset)
+                ),
+                file_size=before_path.stat().st_size,
+                time_method=VideoTimeMethod.MANUALLY_CONFIRMED,
+            )
+            after_segment = replace(
+                result.segment,
+                path=after_path,
+                sequence_number=result.segment.sequence_number + 1,
+                duration_seconds=after_duration,
+                estimated_start=before_segment.estimated_end,
+                estimated_end=result.segment.estimated_end,
+                file_size=after_path.stat().st_size,
+                time_method=VideoTimeMethod.MANUALLY_CONFIRMED,
+            )
+            before_result = replace(
+                result,
+                segment=before_segment,
+                status=ZoomMatchStatus.MANUALLY_CONFIRMED,
+                next_event=None,
+                next_overlap_seconds=0,
+                split_offset_seconds=None,
+                reason="Відео розрізано за Calendar boundary.",
+            )
+            after_result = replace(
+                result,
+                segment=after_segment,
+                status=ZoomMatchStatus.MANUALLY_CONFIRMED,
+                event=result.next_event,
+                next_event=None,
+                next_overlap_seconds=0,
+                split_offset_seconds=None,
+                reason="Друга частина прив’язана до наступного уроку.",
+            )
+        except Exception as error:
+            index = self.zoom_match_results.index(result)
+            self.zoom_match_results[index] = replace(
+                result,
+                status=ZoomMatchStatus.VIDEO_SPLIT_FAILED,
+                reason=f"Не вдалося розрізати відео: {error}",
+            )
+            window.destroy()
+            self._rebuild_zoom_batch_after_resolution()
+            self._show_error(error)
+            return
+        index = self.zoom_match_results.index(result)
+        self.zoom_match_results[index:index + 1] = [
+            before_result,
+            after_result,
+        ]
+        self._save_zoom_decision(
+            before_result,
+            AssignmentType.SPLIT_BETWEEN_EVENTS,
+            "Відео розрізано за підтвердженою точкою.",
+            split_point=offset,
+        )
+        self._save_zoom_decision(
+            after_result,
+            AssignmentType.SPLIT_BETWEEN_EVENTS,
+            "Друга частина відео прив’язана до наступного уроку.",
+            split_point=offset,
+        )
+        window.destroy()
+        self._rebuild_zoom_batch_after_resolution()
+
+    def _rebuild_zoom_batch_after_resolution(self) -> None:
+        assembly = assemble_zoom_batch(
+            self.parsed_calendar_events,
+            tuple(self.zoom_match_results),
+            profile_id=self.profile_var.get().strip(),
+            batch_id=self.batch_var.get().strip(),
+            manual_text_event_ids=frozenset(
+                self.manual_text_event_ids
+            ),
+            ignored_event_ids=frozenset(self.ignored_event_ids),
+        )
+        self.lessons = list(assembly.lessons)
+        self.unresolved_zoom_results = list(assembly.unresolved_results)
+        self.missing_zoom_events = list(assembly.missing_events)
+        unresolved_count = (
+            len(self.unresolved_zoom_results)
+            + len(self.missing_zoom_events)
+            + len(self.zoom_catalog_issues)
+        )
+        if (
+            unresolved_count == 0
+            and self.workflow.state is WorkflowState.RESOLUTION_REQUIRED
+        ):
+            self.workflow.finish_resolution(unresolved_count=0)
+            messagebox.showinfo(
+                APP_TITLE,
+                "Усі записи перевірено. Невирішених питань: 0.",
+            )
+        self._render_zoom_matching_tree()
+        self._refresh_lessons()
+        self._apply_workflow_state()
+
+    def _restart_workflow_preflight(self) -> None:
+        try:
+            self.workflow.start_preflight()
+        except WorkflowTransitionError as error:
+            self._show_error(error)
+            return
+        self._apply_workflow_state()
+        self.workflow.finish_preflight(has_blocking_problems=True)
+        self._apply_workflow_state()
+        self.preflight_result = None
+        self._start_zoom_preflight()
 
     def _import_google_event(self) -> None:
         selection = self.google_event_tree.selection()
         if not selection:
             self._show_error(ValueError("Виберіть подію календаря."))
             return
-        event = self.google_events[int(selection[0])]
+        event_index = self.google_tree_event_index.get(selection[0])
+        if event_index is None:
+            self._show_error(
+                ValueError(
+                    "Цей рядок не має однозначної Calendar event. "
+                    "Спочатку розв’яжіть проблему."
+                )
+            )
+            return
+        event = self.google_events[event_index]
         try:
             form = calendar_event_to_lesson_form(
                 event,
@@ -848,16 +2393,30 @@ class DesktopApplication:
         self.duration_var.set(str(form.duration_hours))
         self.trial_var.set(form.is_trial)
         self.no_recording_var.set(form.is_no_recording)
-        if form.is_no_recording:
-            self.pending_video_paths.clear()
-            self._refresh_pending_files()
+        matched_paths = [
+            result.segment.path
+            for result in self.zoom_match_results
+            if (
+                result.event is not None
+                and result.event.event_id == form.calendar_event_id
+                and result.is_resolved
+            )
+        ]
+        self.pending_video_paths = (
+            [] if form.is_no_recording else matched_paths
+        )
+        self._refresh_pending_files()
         self.notebook.select(self.send_tab)
         self._log(
             f"Імпортовано {form.calendar_status}. "
             + (
                 "Це text-only урок; MP4 не потрібні."
                 if form.is_no_recording
-                else "Додайте MP4."
+                else (
+                    f"Автоматично додано MP4: {len(matched_paths)}."
+                    if matched_paths
+                    else "MP4 не знайдено; виберіть файл вручну."
+                )
             )
         )
 
@@ -1262,8 +2821,18 @@ class DesktopApplication:
         return manifest, config, api_hash, service
 
     def _send_package(self) -> None:
+        if self.workflow.state is not WorkflowState.BATCH_READY:
+            self._show_error(
+                WorkflowTransitionError(
+                    "Надсилання заборонено: спочатку пройдіть preflight, "
+                    "matching і розв’яжіть усі питання."
+                )
+            )
+            return
         try:
             manifest, config, api_hash, service = self._runtime()
+            date_from, date_to = self._selected_period()
+            calendar_id = self._selected_google_calendar_id()
         except Exception as error:
             self._show_error(error)
             return
@@ -1272,6 +2841,12 @@ class DesktopApplication:
             f"Надіслати {len(manifest.lessons)} урок(и) у {manifest.target_peer}?",
         ):
             return
+        try:
+            self.workflow.start_revalidation()
+        except WorkflowTransitionError as error:
+            self._show_error(error)
+            return
+        self._apply_workflow_state()
 
         def progress(current: int, total: int) -> None:
             percent = int(current * 100 / total) if total else 0
@@ -1293,31 +2868,66 @@ class DesktopApplication:
                     }
                     for event_id in snapshots
                 })
-            current = {}
-            missing_changes = {}
-            for event_id, snapshot in snapshots.items():
-                try:
-                    raw_event = await asyncio.to_thread(
-                        self.google_service.get_event,
-                        calendar_id=snapshot.calendar_id,
-                        event_id=event_id,
-                        timezone_name=config.google_timezone,
-                    )
-                except Exception as error:
-                    missing_changes[event_id] = {
-                        "event": (snapshot.summary, str(error))
-                    }
-                    continue
-                current[event_id] = parse_calendar_event(
+            raw_events = await asyncio.to_thread(
+                self.google_service.list_events,
+                calendar_id=calendar_id,
+                date_from=date_from,
+                date_to=date_to,
+                timezone_name=config.google_timezone,
+            )
+            current = {
+                raw_event.id: parse_calendar_event(
                     raw_event,
                     timezone_name=config.google_timezone,
                 )
+                for raw_event in raw_events
+            }
+            expected = {
+                event.event_id: build_calendar_snapshot(event)
+                for event in self.parsed_calendar_events
+            }
+            expected.update(snapshots)
+            added_events = {
+                event_id: {
+                    "event": (
+                        None,
+                        event.original_summary,
+                    )
+                }
+                for event_id, event in current.items()
+                if event_id not in expected
+            }
+            if added_events:
+                raise BatchRevalidationRequired(added_events)
+            validate_calendar_snapshots(expected, current)
+            for event in current.values():
                 self.calendar_report_repository.save_calendar_event_report(
-                    current[event_id]
+                    event
                 )
-            if missing_changes:
-                raise BatchRevalidationRequired(missing_changes)
-            validate_calendar_snapshots(snapshots, current)
+            validate_zoom_sources(self.zoom_match_results)
+            for result in self.zoom_match_results:
+                if (
+                    result.status is ZoomMatchStatus.MANUALLY_CONFIRMED
+                    and result.event is not None
+                    and self.calendar_report_repository
+                    .get_valid_zoom_decision(
+                        result.segment,
+                        result.event,
+                    )
+                    is None
+                ):
+                    raise RuntimeError(
+                        "Ручне рішення для відео більше неактуальне: "
+                        f"{result.segment.path}"
+                    )
+            backup = self.calendar_report_repository.create_backup(
+                self.database_path.parent / "backups"
+            )
+            self.root.after(
+                0,
+                partial(self._log, f"SQLite backup створено: {backup}"),
+            )
+            self.workflow.finish_revalidation(success=True)
 
         self._run_async(
             service.send_manifest(
@@ -1334,6 +2944,9 @@ class DesktopApplication:
         )
 
     def _send_success(self, results: tuple[Lesson, ...]) -> None:
+        if self.workflow.state is WorkflowState.SENDING:
+            self.workflow.finish_sending(success=True)
+        self._apply_workflow_state()
         count = sum(len(result.telegram_message_ids) for result in results)
         self.progress_var.set(100)
         self._log(f"Готово. Підтверджено {count} Telegram message IDs.")
@@ -1410,6 +3023,14 @@ class DesktopApplication:
         callback(result)
 
     def _background_error(self, error: Exception) -> None:
+        if self.workflow.state is WorkflowState.PREFLIGHT_RUNNING:
+            self.workflow.finish_preflight(has_blocking_problems=True)
+        elif self.workflow.state is WorkflowState.MATCHING_RUNNING:
+            self.workflow.finish_matching(has_unresolved_problems=True)
+        elif self.workflow.state is WorkflowState.REVALIDATION_RUNNING:
+            self.workflow.finish_revalidation(success=False)
+        elif self.workflow.state is WorkflowState.SENDING:
+            self.workflow.finish_sending(success=False)
         self._set_busy(False, "Помилка")
         self._show_error(error)
 
@@ -1421,6 +3042,7 @@ class DesktopApplication:
         self._set_status(text)
         if not busy:
             self.progress_var.set(0)
+        self._apply_workflow_state()
 
     def _set_status(self, text: str) -> None:
         self.status_var.set(text)

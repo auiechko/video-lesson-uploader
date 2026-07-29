@@ -103,6 +103,20 @@ class DesktopSettingsController:
             calendar_conflict_tolerance_minutes=(
                 current.calendar_conflict_tolerance_minutes
             ),
+            zoom_recordings_dir=current.zoom_recordings_dir,
+            automatic_time_tolerance_minutes=(
+                current.automatic_time_tolerance_minutes
+            ),
+            manual_time_search_window_minutes=(
+                current.manual_time_search_window_minutes
+            ),
+            next_lesson_overlap_tolerance_minutes=(
+                current.next_lesson_overlap_tolerance_minutes
+            ),
+            minimum_video_size_mb=current.minimum_video_size_mb,
+            video_stability_check_seconds=(
+                current.video_stability_check_seconds
+            ),
         )
         save_config(self.config_path, config)
         if api_hash.strip():
@@ -139,6 +153,12 @@ class DesktopSettingsController:
         client_secrets: str,
         calendar_id: str,
         timezone_name: str,
+        zoom_recordings_dir: str | None = None,
+        automatic_time_tolerance_minutes: int | None = None,
+        manual_time_search_window_minutes: int | None = None,
+        next_lesson_overlap_tolerance_minutes: int | None = None,
+        minimum_video_size_mb: float | None = None,
+        video_stability_check_seconds: float | None = None,
         profile_id: str = "main",
     ) -> LoadedDesktopSettings:
         if not client_secrets.strip():
@@ -148,11 +168,83 @@ class DesktopSettingsController:
         if not timezone_name.strip():
             raise ValueError("Укажіть часовий пояс календаря")
         current = self.load(profile_id)
+        zoom_directory = (
+            current.config.zoom_recordings_dir
+            if zoom_recordings_dir is None
+            else zoom_recordings_dir.strip()
+        )
+        if not zoom_directory:
+            raise ValueError("Виберіть папку локальних записів Zoom")
+        zoom_tolerances = {
+            "automatic_time_tolerance_minutes": (
+                current.config.automatic_time_tolerance_minutes
+                if automatic_time_tolerance_minutes is None
+                else automatic_time_tolerance_minutes
+            ),
+            "manual_time_search_window_minutes": (
+                current.config.manual_time_search_window_minutes
+                if manual_time_search_window_minutes is None
+                else manual_time_search_window_minutes
+            ),
+            "next_lesson_overlap_tolerance_minutes": (
+                current.config.next_lesson_overlap_tolerance_minutes
+                if next_lesson_overlap_tolerance_minutes is None
+                else next_lesson_overlap_tolerance_minutes
+            ),
+        }
+        if any(
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            for value in zoom_tolerances.values()
+        ):
+            raise ValueError(
+                "Допуски часу Zoom мають бути невід’ємними цілими числами"
+            )
+        media_settings = {
+            "minimum_video_size_mb": (
+                current.config.minimum_video_size_mb
+                if minimum_video_size_mb is None
+                else minimum_video_size_mb
+            ),
+            "video_stability_check_seconds": (
+                current.config.video_stability_check_seconds
+                if video_stability_check_seconds is None
+                else video_stability_check_seconds
+            ),
+        }
+        if any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value < 0
+            for value in media_settings.values()
+        ):
+            raise ValueError(
+                "Розмір MP4 і час стабільності мають бути невід’ємними числами"
+            )
         config = replace(
             current.config,
             google_client_secrets=client_secrets.strip(),
             google_calendar_id=calendar_id.strip(),
             google_timezone=timezone_name.strip(),
+            zoom_recordings_dir=zoom_directory,
+            automatic_time_tolerance_minutes=int(
+                zoom_tolerances["automatic_time_tolerance_minutes"]
+            ),
+            manual_time_search_window_minutes=int(
+                zoom_tolerances["manual_time_search_window_minutes"]
+            ),
+            next_lesson_overlap_tolerance_minutes=int(
+                zoom_tolerances[
+                    "next_lesson_overlap_tolerance_minutes"
+                ]
+            ),
+            minimum_video_size_mb=float(
+                media_settings["minimum_video_size_mb"]
+            ),
+            video_stability_check_seconds=float(
+                media_settings["video_stability_check_seconds"]
+            ),
         )
         save_config(self.config_path, config)
         return LoadedDesktopSettings(

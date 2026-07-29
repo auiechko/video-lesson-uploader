@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, fields
 from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from enum import StrEnum
 from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -61,6 +62,9 @@ class ParsedCalendarEvent:
     is_no_recording: bool = False
     is_transferred: bool = False
     parse_error: str = ""
+    recurring_event_id: str = ""
+    original_start_utc: datetime | None = None
+    event_timezone: str = ""
 
     @property
     def is_conducted(self) -> bool:
@@ -142,6 +146,9 @@ class CalendarEventSnapshot:
     is_cancelled: bool
     is_pause: bool
     calendar_id: str = "primary"
+    recurring_event_id: str = ""
+    original_start_utc: str = ""
+    event_timezone: str = ""
 
 
 class BatchRevalidationRequired(RuntimeError):
@@ -232,6 +239,13 @@ def parse_calendar_event(
         is_no_recording=is_no_recording,
         is_transferred=is_transferred,
         parse_error=error,
+        recurring_event_id=event.recurring_event_id,
+        original_start_utc=(
+            event.original_start.astimezone(dt_timezone.utc)
+            if event.original_start is not None
+            else None
+        ),
+        event_timezone=event.event_timezone or timezone.key,
     )
 
 
@@ -312,6 +326,13 @@ def build_calendar_snapshot(
         is_cancelled=event.status is CalendarEventStatus.IGNORED_CANCELLED,
         is_pause=event.status is CalendarEventStatus.IGNORED_PAUSE,
         calendar_id=event.calendar_id,
+        recurring_event_id=event.recurring_event_id,
+        original_start_utc=(
+            event.original_start_utc.isoformat()
+            if event.original_start_utc is not None
+            else ""
+        ),
+        event_timezone=event.event_timezone,
     )
 
 

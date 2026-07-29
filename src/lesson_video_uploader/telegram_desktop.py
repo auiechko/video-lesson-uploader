@@ -32,6 +32,7 @@ class DesktopTelethonClient(Protocol):
     async def connect(self) -> None: ...
     async def disconnect(self) -> None: ...
     async def is_user_authorized(self) -> bool: ...
+    async def get_entity(self, entity: object) -> object: ...
 
 
 ClientFactory = Callable[..., DesktopTelethonClient]
@@ -203,6 +204,12 @@ class TelegramDesktopService:
                 raise TelegramLoginRequired(
                     "Спочатку натисніть «Увійти в Telegram»"
                 )
+            try:
+                await client.get_entity(target_peer)
+            except Exception as error:
+                raise ValueError(
+                    f"Telegram-чат недоступний: {target_peer}"
+                ) from error
             repository = SQLiteSendItemRepository(self.database_path)
             sender = TelethonLessonSender(
                 client,  # type: ignore[arg-type]
