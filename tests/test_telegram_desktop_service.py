@@ -210,7 +210,7 @@ class TelegramDesktopServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(
             ManualReviewRequired,
-            "Скинути історію незавершених",
+            "Скинути всю історію пакета",
         ):
             await service.send_manifest(
                 self.manifest,

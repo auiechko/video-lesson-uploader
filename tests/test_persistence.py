@@ -202,7 +202,7 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(loaded.ordered_video_paths, (Path("second.mp4"), Path("first.mp4")))
         self.assertEqual(loaded.telegram_message_ids, (41, 42))
 
-    def test_reset_incomplete_deliveries_preserves_sent_and_other_batches(
+    def test_reset_batch_delivery_history_includes_sent_but_not_other_batch(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -247,7 +247,7 @@ class PersistenceTests(unittest.TestCase):
             for lesson in (unknown, partial, sent, other_batch):
                 repository.save(lesson)
 
-            reset_count = repository.reset_incomplete_deliveries(
+            reset_count = repository.reset_batch_delivery_history(
                 "profile-1",
                 "batch-1",
             )
@@ -257,13 +257,14 @@ class PersistenceTests(unittest.TestCase):
             preserved_sent = repository.get(sent.identity)
             preserved_other = repository.get(other_batch.identity)
 
-        self.assertEqual(reset_count, 2)
+        self.assertEqual(reset_count, 3)
         self.assertEqual(reset_unknown.status, SendStatus.PENDING)
         self.assertEqual(reset_unknown.telegram_message_ids, ())
         self.assertEqual(reset_unknown.album_deliveries, ())
         self.assertEqual(reset_partial.status, SendStatus.PENDING)
-        self.assertEqual(preserved_sent.status, SendStatus.SENT)
-        self.assertEqual(preserved_sent.telegram_message_ids, (101,))
+        self.assertEqual(preserved_sent.status, SendStatus.PENDING)
+        self.assertEqual(preserved_sent.telegram_message_ids, ())
+        self.assertEqual(preserved_sent.album_deliveries, ())
         self.assertEqual(
             preserved_other.status,
             SendStatus.DELIVERY_UNKNOWN,

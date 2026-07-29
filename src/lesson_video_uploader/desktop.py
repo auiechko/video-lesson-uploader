@@ -127,10 +127,10 @@ HELP_TOPICS: Mapping[str, tuple[str, str]] = {
             "Надсилання доступне лише після завершення перевірки Calendar "
             "і Zoom без невирішених питань.\n\n"
             "«Перевірити невідому доставку» шукає перервані відправлення "
-            "в Telegram. «Скинути історію незавершених» повертає лише "
-            "непідтверджені спроби поточного пакета в PENDING; підтверджені "
-            "SENT завжди зберігаються. Перед скиданням обов’язково "
-            "перевірте Telegram, щоб не створити дублікат."
+            "в Telegram. «Скинути всю історію пакета» повертає всі записи "
+            "поточного Profile ID + Batch ID у PENDING, включно із SENT. "
+            "Повідомлення з Telegram не видаляються, тому наступне "
+            "надсилання створить їхні дублікати."
         ),
     ),
     "calendar": (
@@ -688,8 +688,8 @@ class DesktopApplication:
         reconcile_button.pack(side=tk.LEFT, padx=8)
         reset_delivery_button = ttk.Button(
             actions,
-            text="Скинути історію незавершених",
-            command=self._reset_incomplete_delivery_history,
+            text="Скинути всю історію пакета",
+            command=self._reset_batch_delivery_history,
         )
         reset_delivery_button.pack(side=tk.LEFT)
         ttk.Button(
@@ -3510,7 +3510,7 @@ class DesktopApplication:
         self.workflow = WorkflowStateMachine.restored_batch_ready()
         return True
 
-    def _reset_incomplete_delivery_history(self) -> None:
+    def _reset_batch_delivery_history(self) -> None:
         profile_id = self.profile_var.get().strip()
         batch_id = self.batch_var.get().strip()
         if not profile_id or not batch_id:
@@ -3521,11 +3521,12 @@ class DesktopApplication:
         if not messagebox.askyesno(
             APP_TITLE,
             (
-                "Скинути локальну історію незавершених доставок для "
+                "Скинути всю локальну історію доставок для "
                 f"пакета «{batch_id}»?\n\n"
-                "Підтверджені SENT не буде стерто. Перед продовженням "
-                "перевірте Telegram: якщо непідтверджений урок там уже є, "
-                "повторне надсилання створить дублікат.\n\n"
+                "Усі статуси SENT також стануть PENDING. Повідомлення "
+                "не видаляються з Telegram, тому наступне надсилання "
+                "повторно відправить усі уроки цього пакета і створить "
+                "дублікати.\n\n"
                 "Перед скиданням буде створено резервну копію SQLite."
             ),
         ):
@@ -3535,7 +3536,7 @@ class DesktopApplication:
             backup = repository.create_backup(
                 self.database_path.parent / "backups"
             )
-            reset_count = repository.reset_incomplete_deliveries(
+            reset_count = repository.reset_batch_delivery_history(
                 profile_id,
                 batch_id,
             )
@@ -3545,7 +3546,7 @@ class DesktopApplication:
             self._show_error(error)
             return
         self._log(
-            f"Скинуто незавершених доставок: {reset_count}. "
+            f"Скинуто записів історії доставки: {reset_count}. "
             f"SQLite backup: {backup}"
         )
         next_step = (
@@ -3559,8 +3560,8 @@ class DesktopApplication:
         messagebox.showinfo(
             APP_TITLE,
             (
-                f"Скинуто незавершених доставок: {reset_count}.\n"
-                "Підтверджені SENT збережено.\n"
+                f"Скинуто записів історії доставки: {reset_count}.\n"
+                "Усі попередні SENT тепер мають статус PENDING.\n"
                 f"{next_step}"
             ),
         )
@@ -3752,7 +3753,7 @@ class DesktopApplication:
                     if restored
                     else (
                         "Якщо ви вже перевірили Telegram, натисніть "
-                        "«Скинути історію незавершених»."
+                        "«Скинути всю історію пакета»."
                         if uncertain
                         else (
                             "Для активації надсилання повторіть перевірку "

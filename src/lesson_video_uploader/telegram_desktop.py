@@ -258,8 +258,8 @@ class TelegramDesktopService:
                 "Надсилання заблоковано: "
                 f"{len(blocked_lessons)} урок(и) мають невідому або "
                 "незавершену доставку. Натисніть «Перевірити невідому "
-                "доставку», а після перевірки Telegram — «Скинути історію "
-                f"незавершених». Перший урок: {first.caption}"
+                "доставку», а для повного повторного надсилання — "
+                f"«Скинути всю історію пакета». Перший урок: {first.caption}"
             )
         snapshots = {
             lesson.calendar_event_id: lesson.calendar_snapshot

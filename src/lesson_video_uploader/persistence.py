@@ -467,15 +467,15 @@ class SQLiteSendItemRepository:
                         calendar_snapshot=excluded.calendar_snapshot
                 """, values)
 
-    def reset_incomplete_deliveries(
+    def reset_batch_delivery_history(
         self,
         profile_id: str,
         batch_id: str,
     ) -> int:
-        """Reset only delivery attempts that are unsafe to retry automatically.
+        """Reset every send item in one profile/batch to PENDING.
 
-        Confirmed SENT rows are intentionally preserved. The caller is expected
-        to create a backup and obtain explicit user confirmation first.
+        This intentionally includes SENT rows. The caller is expected to create
+        a backup and obtain explicit user confirmation first.
         """
         normalized_profile_id = profile_id.strip()
         normalized_batch_id = batch_id.strip()
@@ -483,17 +483,10 @@ class SQLiteSendItemRepository:
             raise ValueError("profile_id is required")
         if not normalized_batch_id:
             raise ValueError("batch_id is required")
-        resettable_statuses = (
-            SendStatus.UPLOADING.value,
-            SendStatus.FAILED.value,
-            SendStatus.DELIVERY_UNKNOWN.value,
-            SendStatus.PARTIALLY_CONFIRMED.value,
-        )
-        placeholders = ", ".join("?" for _ in resettable_statuses)
         with closing(self._connect()) as connection:
             with connection:
                 cursor = connection.execute(
-                    f"""
+                    """
                     UPDATE send_items
                     SET telegram_album_group_id = NULL,
                         telegram_message_ids = '[]',
@@ -503,14 +496,12 @@ class SQLiteSendItemRepository:
                         sent_at = NULL
                     WHERE profile_id = ?
                       AND batch_id = ?
-                      AND status IN ({placeholders})
                     """,
                     (
                         SendStatus.PENDING.value,
                         datetime.now(timezone.utc).isoformat(),
                         normalized_profile_id,
                         normalized_batch_id,
-                        *resettable_statuses,
                     ),
                 )
         return max(cursor.rowcount, 0)

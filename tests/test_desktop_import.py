@@ -112,7 +112,7 @@ class DesktopImportTests(unittest.TestCase):
         "lesson_video_uploader.desktop.messagebox.askyesno",
         return_value=True,
     )
-    def test_reset_incomplete_history_preserves_sent_and_restores_send(
+    def test_reset_batch_history_restores_send(
         self,
         _ask_yes_no: MagicMock,
         show_info: MagicMock,
@@ -173,13 +173,17 @@ class DesktopImportTests(unittest.TestCase):
             app._show_error = MagicMock()
             app._log = MagicMock()
 
-            app._reset_incomplete_delivery_history()
+            app._reset_batch_delivery_history()
 
             restored = repository.get(lesson.identity)
 
         self.assertEqual(restored.status, SendStatus.PENDING)
         self.assertEqual(app.workflow.state, WorkflowState.BATCH_READY)
         app._show_error.assert_not_called()
+        self.assertIn(
+            "Усі статуси SENT також стануть PENDING",
+            _ask_yes_no.call_args.args[1],
+        )
         show_info.assert_called_once()
 
 

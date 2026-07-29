@@ -24,7 +24,7 @@
 - `test_workflow.py` — допустимі переходи й блокування прямого send.
 - `test_reconciliation.py` — `PENDING` не стає невідомою доставкою, а
   підтверджені Telegram-повідомлення відновлюють `SENT`.
-- `test_persistence.py` — скидання незавершеної історії зберігає `SENT` та
+- `test_persistence.py` — повне скидання переводить `SENT` у `PENDING` та
   не зачіпає інші batch.
 - `test_zoom_batch.py` — один Calendar event, один album, один caption.
 - `test_zoom_revalidation.py` — зміна MP4 після preview та перевірка MP4
