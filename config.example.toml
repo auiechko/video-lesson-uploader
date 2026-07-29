@@ -12,6 +12,16 @@ calendar_id = "primary"
 timezone = "Europe/Kyiv"
 calendar_conflict_tolerance_minutes = 10
 
+[zoom]
+# У GUI можна вибрати будь-яку кореневу папку локальних записів Zoom.
+# Типовий шлях: C:\Users\YOUR_NAME\Documents\Zoom або папка Zoom у OneDrive.
+recordings_dir = "C:\\Users\\YOUR_NAME\\Documents\\Zoom"
+automatic_time_tolerance_minutes = 30
+manual_time_search_window_minutes = 180
+next_lesson_overlap_tolerance_minutes = 10
+minimum_video_size_mb = 5
+video_stability_check_seconds = 5
+
 [caption]
 # Використовується лише коли один урок має понад 10 MP4.
 album_batch = " (альбом {album_number}/{album_count})"
