@@ -202,6 +202,73 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(loaded.ordered_video_paths, (Path("second.mp4"), Path("first.mp4")))
         self.assertEqual(loaded.telegram_message_ids, (41, 42))
 
+    def test_reset_incomplete_deliveries_preserves_sent_and_other_batches(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = SQLiteSendItemRepository(
+                Path(directory) / "db.sqlite3"
+            )
+
+            def item(
+                event_id: str,
+                *,
+                batch_id: str = "batch-1",
+                status: SendStatus,
+            ) -> Lesson:
+                return Lesson(
+                    profile_id="profile-1",
+                    batch_id=batch_id,
+                    calendar_event_id=event_id,
+                    event_start=datetime(2026, 6, 12, 10),
+                    caption=event_id,
+                    ordered_video_paths=(Path(f"{event_id}.mp4"),),
+                    telegram_message_ids=(101,),
+                    album_deliveries=(
+                        AlbumDelivery(1, 1, 777, (101,)),
+                    ),
+                    status=status,
+                )
+
+            unknown = item(
+                "unknown",
+                status=SendStatus.DELIVERY_UNKNOWN,
+            )
+            partial = item(
+                "partial",
+                status=SendStatus.PARTIALLY_CONFIRMED,
+            )
+            sent = item("sent", status=SendStatus.SENT)
+            other_batch = item(
+                "other",
+                batch_id="batch-2",
+                status=SendStatus.DELIVERY_UNKNOWN,
+            )
+            for lesson in (unknown, partial, sent, other_batch):
+                repository.save(lesson)
+
+            reset_count = repository.reset_incomplete_deliveries(
+                "profile-1",
+                "batch-1",
+            )
+
+            reset_unknown = repository.get(unknown.identity)
+            reset_partial = repository.get(partial.identity)
+            preserved_sent = repository.get(sent.identity)
+            preserved_other = repository.get(other_batch.identity)
+
+        self.assertEqual(reset_count, 2)
+        self.assertEqual(reset_unknown.status, SendStatus.PENDING)
+        self.assertEqual(reset_unknown.telegram_message_ids, ())
+        self.assertEqual(reset_unknown.album_deliveries, ())
+        self.assertEqual(reset_partial.status, SendStatus.PENDING)
+        self.assertEqual(preserved_sent.status, SendStatus.SENT)
+        self.assertEqual(preserved_sent.telegram_message_ids, (101,))
+        self.assertEqual(
+            preserved_other.status,
+            SendStatus.DELIVERY_UNKNOWN,
+        )
+
     def test_round_trip_preserves_text_mode_details_and_calendar_snapshot(self) -> None:
         kyiv = ZoneInfo("Europe/Kyiv")
         parsed = parse_calendar_event(GoogleCalendarEvent(

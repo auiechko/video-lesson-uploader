@@ -87,7 +87,10 @@ from .zoom_recordings import (
     ZoomRecordingCatalog,
     ZoomVideoSegment,
 )
-from .zoom_revalidation import validate_zoom_sources
+from .zoom_revalidation import (
+    validate_manifest_video_files,
+    validate_zoom_sources,
+)
 
 APP_TITLE = "Lesson Video Uploader"
 CONTROL_KEY_MASK = 0x0004
@@ -122,7 +125,12 @@ HELP_TOPICS: Mapping[str, tuple[str, str]] = {
             "не видаляє зі списку. Після змін натисніть «Зберегти зміни "
             "уроку».\n\n"
             "Надсилання доступне лише після завершення перевірки Calendar "
-            "і Zoom без невирішених питань."
+            "і Zoom без невирішених питань.\n\n"
+            "«Перевірити невідому доставку» шукає перервані відправлення "
+            "в Telegram. «Скинути історію незавершених» повертає лише "
+            "непідтверджені спроби поточного пакета в PENDING; підтверджені "
+            "SENT завжди зберігаються. Перед скиданням обов’язково "
+            "перевірте Telegram, щоб не створити дублікат."
         ),
     ),
     "calendar": (
@@ -678,12 +686,22 @@ class DesktopApplication:
             command=self._reconcile_package,
         )
         reconcile_button.pack(side=tk.LEFT, padx=8)
+        reset_delivery_button = ttk.Button(
+            actions,
+            text="Скинути історію незавершених",
+            command=self._reset_incomplete_delivery_history,
+        )
+        reset_delivery_button.pack(side=tk.LEFT)
         ttk.Button(
             actions,
             text="Довідка",
             command=lambda: self._show_help("lessons"),
         ).pack(side=tk.RIGHT)
-        self.action_buttons.extend((self.send_button, reconcile_button))
+        self.action_buttons.extend((
+            self.send_button,
+            reconcile_button,
+            reset_delivery_button,
+        ))
 
         ttk.Label(
             parent,
@@ -3314,9 +3332,26 @@ class DesktopApplication:
         self.batch_var.set(manifest.batch_id)
         self.target_var.set(str(manifest.target_peer))
         self.lessons = list(manifest.lessons)
+        if self.lessons:
+            lesson_dates = [
+                lesson.event_start.date().isoformat()
+                for lesson in self.lessons
+            ]
+            self.google_from_var.set(min(lesson_dates))
+            self.google_to_var.set(max(lesson_dates))
+        self.workflow = WorkflowStateMachine()
         self._cancel_lesson_edit()
         self._refresh_lessons()
-        self._log(f"Відкрито пакет: {path}")
+        restored = self._try_restore_ready_batch()
+        self._apply_workflow_state()
+        self._log(
+            f"Відкрито пакет: {path}"
+            + (
+                ". Готовність до продовження надсилання відновлено."
+                if restored
+                else ". Перед надсиланням потрібні перевірки."
+            )
+        )
 
     def _save_batch(self) -> None:
         try:
@@ -3435,6 +3470,101 @@ class DesktopApplication:
         service = TelegramDesktopService(factory, self.database_path)
         return manifest, config, api_hash, service
 
+    def _try_restore_ready_batch(
+        self,
+        repository: SQLiteSendItemRepository | None = None,
+    ) -> bool:
+        if not self.lessons:
+            return False
+        repository = repository or SQLiteSendItemRepository(
+            self.database_path
+        )
+        effective_lessons = tuple(
+            repository.get(lesson.identity) or lesson
+            for lesson in self.lessons
+        )
+        if not all(
+            lesson.calendar_snapshot is not None
+            for lesson in effective_lessons
+        ):
+            return False
+        if any(
+            lesson.status not in {
+                SendStatus.PENDING,
+                SendStatus.SENT,
+            }
+            for lesson in effective_lessons
+        ):
+            return False
+        if not any(
+            lesson.status is SendStatus.PENDING
+            for lesson in effective_lessons
+        ):
+            return False
+        if any(
+            not path.is_file()
+            for lesson in effective_lessons
+            for path in lesson.ordered_video_paths
+        ):
+            return False
+        self.workflow = WorkflowStateMachine.restored_batch_ready()
+        return True
+
+    def _reset_incomplete_delivery_history(self) -> None:
+        profile_id = self.profile_var.get().strip()
+        batch_id = self.batch_var.get().strip()
+        if not profile_id or not batch_id:
+            self._show_error(
+                ValueError("Заповніть Profile ID та Batch ID")
+            )
+            return
+        if not messagebox.askyesno(
+            APP_TITLE,
+            (
+                "Скинути локальну історію незавершених доставок для "
+                f"пакета «{batch_id}»?\n\n"
+                "Підтверджені SENT не буде стерто. Перед продовженням "
+                "перевірте Telegram: якщо непідтверджений урок там уже є, "
+                "повторне надсилання створить дублікат.\n\n"
+                "Перед скиданням буде створено резервну копію SQLite."
+            ),
+        ):
+            return
+        try:
+            repository = SQLiteSendItemRepository(self.database_path)
+            backup = repository.create_backup(
+                self.database_path.parent / "backups"
+            )
+            reset_count = repository.reset_incomplete_deliveries(
+                profile_id,
+                batch_id,
+            )
+            restored = self._try_restore_ready_batch(repository)
+            self._apply_workflow_state()
+        except Exception as error:
+            self._show_error(error)
+            return
+        self._log(
+            f"Скинуто незавершених доставок: {reset_count}. "
+            f"SQLite backup: {backup}"
+        )
+        next_step = (
+            "Кнопка «Надіслати в Telegram» знову активна."
+            if restored
+            else (
+                "Щоб активувати надсилання, повторіть перевірку "
+                "конвертації та відповідності."
+            )
+        )
+        messagebox.showinfo(
+            APP_TITLE,
+            (
+                f"Скинуто незавершених доставок: {reset_count}.\n"
+                "Підтверджені SENT збережено.\n"
+                f"{next_step}"
+            ),
+        )
+
     def _send_package(self) -> None:
         if self.workflow.state is not WorkflowState.BATCH_READY:
             self._show_error(
@@ -3520,6 +3650,8 @@ class DesktopApplication:
                     event
                 )
             validate_zoom_sources(self.zoom_match_results)
+            if not self.zoom_match_results:
+                validate_manifest_video_files(manifest.lessons)
             for result in self.zoom_match_results:
                 if (
                     result.status is ZoomMatchStatus.MANUALLY_CONFIRMED
@@ -3595,10 +3727,40 @@ class DesktopApplication:
 
     def _reconcile_success(self, results: tuple[Lesson, ...]) -> None:
         sent = sum(result.status is SendStatus.SENT for result in results)
-        uncertain = len(results) - sent
+        pending = sum(
+            result.status is SendStatus.PENDING
+            for result in results
+        )
+        uncertain = sum(
+            result.status in {
+                SendStatus.UPLOADING,
+                SendStatus.DELIVERY_UNKNOWN,
+                SendStatus.PARTIALLY_CONFIRMED,
+            }
+            for result in results
+        )
+        restored = uncertain == 0 and self._try_restore_ready_batch()
+        self._apply_workflow_state()
         messagebox.showinfo(
             APP_TITLE,
-            f"Підтверджено SENT: {sent}\nПотребують ручної перевірки: {uncertain}",
+            (
+                f"Підтверджено SENT: {sent}\n"
+                f"Ще не надсилалися (PENDING): {pending}\n"
+                f"Потребують ручної перевірки: {uncertain}\n\n"
+                + (
+                    "Надсилання можна продовжити."
+                    if restored
+                    else (
+                        "Якщо ви вже перевірили Telegram, натисніть "
+                        "«Скинути історію незавершених»."
+                        if uncertain
+                        else (
+                            "Для активації надсилання повторіть перевірку "
+                            "конвертації та відповідності."
+                        )
+                    )
+                )
+            ),
         )
 
     def _run_async(

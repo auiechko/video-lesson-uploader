@@ -4,6 +4,7 @@ import math
 from collections.abc import Iterable
 
 from .media_tools import probe_mp4
+from .models import Lesson, LessonSendMode
 from .zoom_matching import ZoomMatchResult
 from .zoom_recordings import MetadataProbe
 
@@ -19,6 +20,42 @@ class ZoomSourceRevalidationError(RuntimeError):
             "Відеофайли змінилися після підготовки batch:\n"
             f"{details}"
         )
+
+
+def validate_manifest_video_files(
+    lessons: Iterable[Lesson],
+    *,
+    metadata_probe: MetadataProbe = probe_mp4,
+) -> None:
+    """Validate current media when resuming a saved batch after restart."""
+    changes: dict[str, str] = {}
+    seen_paths: set[str] = set()
+    for lesson in lessons:
+        if lesson.send_mode is LessonSendMode.TEXT_ONLY:
+            continue
+        for path in lesson.ordered_video_paths:
+            path_key = str(path)
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            if not path.is_file():
+                changes[path_key] = "file is missing"
+                continue
+            try:
+                if path.stat().st_size <= 0:
+                    changes[path_key] = "file is empty"
+                    continue
+                metadata = metadata_probe(path)
+            except (OSError, RuntimeError, ValueError) as error:
+                changes[path_key] = f"ffprobe failed: {error}"
+                continue
+            if not metadata.has_video_stream:
+                changes[path_key] = "video stream is missing"
+                continue
+            if metadata.duration_seconds <= 0:
+                changes[path_key] = "video duration is unavailable"
+    if changes:
+        raise ZoomSourceRevalidationError(changes)
 
 
 def validate_zoom_sources(

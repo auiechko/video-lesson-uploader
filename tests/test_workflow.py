@@ -100,6 +100,22 @@ class WorkflowStateMachineTests(unittest.TestCase):
             ),
         )
 
+    def test_prepared_batch_can_restore_ready_state_after_restart(self) -> None:
+        workflow = WorkflowStateMachine.restored_batch_ready()
+
+        self.assertEqual(workflow.state, WorkflowState.BATCH_READY)
+        self.assertTrue(workflow.buttons.send_enabled)
+        self.assertEqual(
+            workflow.history,
+            (
+                WorkflowState.PERIOD_SELECTED,
+                WorkflowState.PREFLIGHT_RUNNING,
+                WorkflowState.PREFLIGHT_PASSED,
+                WorkflowState.MATCHING_RUNNING,
+                WorkflowState.BATCH_READY,
+            ),
+        )
+
     @staticmethod
     def _ready_workflow() -> WorkflowStateMachine:
         workflow = WorkflowStateMachine()

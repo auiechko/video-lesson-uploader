@@ -23,6 +23,10 @@
 8. Перед upload `zoom_revalidation.py` повторно перевіряє MP4, Calendar
    звіряється зі snapshot, SQLite резервується, а Telegram-чат перевіряється
    на доступність.
+9. `reconciliation.py` перевіряє в Telegram лише фактично перервані або
+   невідомі доставки. `PENDING` не змінюється. Безпечне ручне скидання
+   повертає незавершені записи поточного batch у `PENDING`, але ніколи не
+   змінює `SENT`; перед цим створюється SQLite backup.
 
 ## Незмінні правила
 
@@ -41,3 +45,6 @@ BATCH_READY → REVALIDATION_RUNNING → SENDING → COMPLETED`.
 На проблемних гілках використовуються `PREFLIGHT_BLOCKED`,
 `RESOLUTION_REQUIRED`, `BATCH_REVALIDATION_REQUIRED`, `SEND_PAUSED` і
 `SEND_FAILED`. Перехід із блокувального стану прямо у `SENDING` заборонений.
+Після перезапуску підготовлений batch із Calendar snapshot може відновити
+`BATCH_READY`; перед фактичним upload все одно виконуються Calendar та MP4
+revalidation.

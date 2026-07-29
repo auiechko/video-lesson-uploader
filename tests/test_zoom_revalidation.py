@@ -7,6 +7,7 @@ from pathlib import Path
 
 from lesson_video_uploader.calendar_rules import parse_calendar_event
 from lesson_video_uploader.google_calendar import GoogleCalendarEvent
+from lesson_video_uploader.models import Lesson
 from lesson_video_uploader.zoom_matching import (
     ZoomMatchResult,
     ZoomMatchStatus,
@@ -19,6 +20,7 @@ from lesson_video_uploader.zoom_recordings import (
 )
 from lesson_video_uploader.zoom_revalidation import (
     ZoomSourceRevalidationError,
+    validate_manifest_video_files,
     validate_zoom_sources,
 )
 
@@ -117,6 +119,47 @@ class ZoomSourceRevalidationTests(unittest.TestCase):
                         has_video_stream=True,
                     ),
                 )
+
+    def test_resumed_manifest_rechecks_current_video(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "video.mp4"
+            path.write_bytes(b"video")
+            lesson = Lesson(
+                profile_id="main",
+                batch_id="batch",
+                calendar_event_id="event",
+                event_start=datetime(2026, 7, 23, 14),
+                caption="lesson",
+                ordered_video_paths=(path,),
+            )
+
+            validate_manifest_video_files(
+                (lesson,),
+                metadata_probe=lambda _path: Mp4Metadata(
+                    duration_seconds=3600,
+                    has_video_stream=True,
+                ),
+            )
+
+    def test_resumed_manifest_blocks_missing_video(self) -> None:
+        path = Path("missing-video.mp4")
+        lesson = Lesson(
+            profile_id="main",
+            batch_id="batch",
+            calendar_event_id="event",
+            event_start=datetime(2026, 7, 23, 14),
+            caption="lesson",
+            ordered_video_paths=(path,),
+        )
+
+        with self.assertRaises(ZoomSourceRevalidationError):
+            validate_manifest_video_files(
+                (lesson,),
+                metadata_probe=lambda _path: Mp4Metadata(
+                    duration_seconds=3600,
+                    has_video_stream=True,
+                ),
+            )
 
 
 if __name__ == "__main__":

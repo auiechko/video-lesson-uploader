@@ -22,8 +22,13 @@
 - `test_zoom_matching.py` — допуски часу, конфлікти, overlap і split.
 - `test_zoom_decisions.py` — повторне використання й анулювання ручних рішень.
 - `test_workflow.py` — допустимі переходи й блокування прямого send.
+- `test_reconciliation.py` — `PENDING` не стає невідомою доставкою, а
+  підтверджені Telegram-повідомлення відновлюють `SENT`.
+- `test_persistence.py` — скидання незавершеної історії зберігає `SENT` та
+  не зачіпає інші batch.
 - `test_zoom_batch.py` — один Calendar event, один album, один caption.
-- `test_zoom_revalidation.py` — зміна MP4 після preview.
+- `test_zoom_revalidation.py` — зміна MP4 після preview та перевірка MP4
+  відновленого batch.
 - `test_telegram_desktop_service.py` — Calendar revalidation, доступність чату
   й заборона upload до завершення перевірок.
 

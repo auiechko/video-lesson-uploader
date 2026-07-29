@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-from lesson_video_uploader.models import Lesson, LessonDetails
+from lesson_video_uploader.calendar_rules import CalendarEventSnapshot
+from lesson_video_uploader.models import (
+    Lesson,
+    LessonDetails,
+    SendStatus,
+)
+from lesson_video_uploader.persistence import SQLiteSendItemRepository
+from lesson_video_uploader.workflow import (
+    WorkflowState,
+    WorkflowStateMachine,
+)
 
 
 class DesktopImportTests(unittest.TestCase):
@@ -95,6 +106,81 @@ class DesktopImportTests(unittest.TestCase):
 
         app._open_local_path.assert_called_once_with(paths[1])
         app._show_error.assert_not_called()
+
+    @patch("lesson_video_uploader.desktop.messagebox.showinfo")
+    @patch(
+        "lesson_video_uploader.desktop.messagebox.askyesno",
+        return_value=True,
+    )
+    def test_reset_incomplete_history_preserves_sent_and_restores_send(
+        self,
+        _ask_yes_no: MagicMock,
+        show_info: MagicMock,
+    ) -> None:
+        from lesson_video_uploader.desktop import DesktopApplication
+
+        snapshot = CalendarEventSnapshot(
+            event_id="event-1",
+            summary="1 Менеджер (Учень 10) Учко ТГ",
+            student_id="1",
+            student_name="Учень",
+            student_age=10,
+            local_date="2026-07-29",
+            start="2026-07-29T10:00:00+03:00",
+            end="2026-07-29T11:00:00+03:00",
+            duration_minutes=60,
+            status="NORMAL",
+            is_trial=False,
+            is_no_recording=False,
+            is_transferred=False,
+            is_cancelled=False,
+            is_pause=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "lesson.mp4"
+            video.write_bytes(b"video")
+            lesson = Lesson(
+                profile_id="main",
+                batch_id="batch",
+                calendar_event_id="event-1",
+                event_start=datetime(2026, 7, 29, 10),
+                caption="29.07.2026 1 Учень 10р індив",
+                ordered_video_paths=(video,),
+                calendar_snapshot=snapshot,
+            )
+            database = root / "deliveries.sqlite3"
+            repository = SQLiteSendItemRepository(database)
+            repository.save(Lesson(
+                profile_id=lesson.profile_id,
+                batch_id=lesson.batch_id,
+                calendar_event_id=lesson.calendar_event_id,
+                event_start=lesson.event_start,
+                caption=lesson.caption,
+                ordered_video_paths=lesson.ordered_video_paths,
+                status=SendStatus.DELIVERY_UNKNOWN,
+                calendar_snapshot=snapshot,
+            ))
+            app = DesktopApplication.__new__(DesktopApplication)
+            app.profile_var = MagicMock()
+            app.profile_var.get.return_value = "main"
+            app.batch_var = MagicMock()
+            app.batch_var.get.return_value = "batch"
+            app.database_path = database
+            app.lessons = [lesson]
+            app.workflow = WorkflowStateMachine()
+            app._apply_workflow_state = MagicMock()
+            app._show_error = MagicMock()
+            app._log = MagicMock()
+
+            app._reset_incomplete_delivery_history()
+
+            restored = repository.get(lesson.identity)
+
+        self.assertEqual(restored.status, SendStatus.PENDING)
+        self.assertEqual(app.workflow.state, WorkflowState.BATCH_READY)
+        app._show_error.assert_not_called()
+        show_info.assert_called_once()
 
 
 if __name__ == "__main__":

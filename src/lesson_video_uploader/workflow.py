@@ -97,6 +97,16 @@ class WorkflowStateMachine:
     def history(self) -> tuple[WorkflowState, ...]:
         return tuple(self._history)
 
+    @classmethod
+    def restored_batch_ready(cls) -> WorkflowStateMachine:
+        """Restore a persisted, previously prepared batch after app restart."""
+        workflow = cls()
+        workflow.start_preflight()
+        workflow.finish_preflight(has_blocking_problems=False)
+        workflow.start_matching()
+        workflow.finish_matching(has_unresolved_problems=False)
+        return workflow
+
     @property
     def can_create_telegram_client(self) -> bool:
         return self.state is WorkflowState.SENDING
