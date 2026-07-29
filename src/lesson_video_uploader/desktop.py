@@ -30,6 +30,7 @@ from .desktop_controller import (
     build_gui_manifest,
     create_lesson_from_form,
     form_from_lesson,
+    save_lesson_to_batch,
 )
 from .google_calendar import (
     CalendarEventNotSendable,
@@ -108,6 +109,91 @@ _TABLE_DATE_FORMATS = (
     "%H:%M:%S",
     "%H:%M",
 )
+HELP_TOPICS: Mapping[str, tuple[str, str]] = {
+    "lessons": (
+        "Уроки та надсилання",
+        (
+            "Ліва частина — редактор одного уроку. Додайте MP4 у "
+            "хронологічному порядку або позначте «Без запису».\n\n"
+            "Права частина — уроки готового пакета. Виберіть урок, щоб "
+            "побачити його файли. Подвійний клік по файлу або кнопка "
+            "«Відкрити файл» запускає відео у стандартному програвачі.\n\n"
+            "«Редагувати вибраний урок» копіює його дані в редактор, але "
+            "не видаляє зі списку. Після змін натисніть «Зберегти зміни "
+            "уроку».\n\n"
+            "Надсилання доступне лише після завершення перевірки Calendar "
+            "і Zoom без невирішених питань."
+        ),
+    ),
+    "calendar": (
+        "Google Calendar і Zoom",
+        (
+            "У верхній прокручуваній області налаштовуються Google "
+            "Calendar, період перевірки, папка записів Zoom і часові "
+            "допуски.\n\n"
+            "Порядок роботи: 1) «Перевірити конвертацію»; "
+            "2) «Перевірити відповідність»; 3) вирішити всі червоні "
+            "рядки; 4) перейти до надсилання.\n\n"
+            "Червоний рядок означає невирішену або блокувальну проблему. "
+            "Зелений — готову відповідність. Заголовки таблиці сортують "
+            "рядки; нижня смуга прокрутки показує приховані колонки.\n\n"
+            "Події «Вільна година», «ПАУЗА» і «ВП» не створюють уроків "
+            "для надсилання."
+        ),
+    ),
+    "telegram": (
+        "Telegram і безпека",
+        (
+            "API ID та номер телефону беруться з налаштувань Telegram. "
+            "API hash зберігається тільки в системному сховищі паролів "
+            "Windows і після повторного відкриття не показується.\n\n"
+            "Спочатку збережіть налаштування, потім натисніть "
+            "«Увійти в Telegram». Код входу й пароль 2FA не записуються "
+            "у config, SQLite або журнали."
+        ),
+    ),
+    "preflight": (
+        "Проблеми конвертації Zoom",
+        (
+            "Тут показані всі Zoom-папки, які ще не мають технічно "
+            "готового MP4. Перегляньте статус, причину та рекомендовану "
+            "дію.\n\n"
+            "Відкрийте проблемну папку, завершіть конвертацію або зробіть "
+            "OneDrive-файл доступним локально, а потім натисніть "
+            "«Повторити перевірку». Поки існує хоча б один такий рядок, "
+            "зіставлення й Telegram-send заблоковані."
+        ),
+    ),
+    "missing_zoom": (
+        "Zoom-папку не знайдено",
+        (
+            "Для проведеного уроку не знайдено відповідний запис Zoom. "
+            "Вкажіть MP4 або папку вручну, підтвердьте урок без запису чи "
+            "позначте, що урок не проводився.\n\n"
+            "«Відкласти рішення» нічого не змінює: питання залишиться "
+            "червоним і надсилання буде заблоковане."
+        ),
+    ),
+    "zoom_conflict": (
+        "Підтвердження відповідності",
+        (
+            "Порівняйте час Zoom, дані Calendar і preview-кадри. "
+            "Підтвердьте поточний урок, виберіть інший або явно вирішіть, "
+            "кому належить довге відео.\n\n"
+            "Розрізання створює окремі сегменти для різних уроків. "
+            "«Відкласти рішення» залишає запис невирішеним."
+        ),
+    ),
+    "choose_event": (
+        "Вибір іншого уроку",
+        (
+            "У таблиці показані проведені Calendar-події в межах "
+            "налаштованого ручного часового вікна. Порівняйте початок, "
+            "різницю часу та учня, виберіть правильний рядок і натисніть "
+            "«Обрати»."
+        ),
+    ),
+}
 
 
 def _format_seconds(value: float | None) -> str:
@@ -236,6 +322,7 @@ class DesktopApplication:
         self.pending_calendar_form: LessonForm | None = None
         self.lessons: list[Lesson] = []
         self.pending_video_paths: list[Path] = []
+        self.editing_calendar_event_id: str | None = None
         self.workflow = WorkflowStateMachine()
         self.preflight_service = ZoomPreflightService()
         self.preflight_result: ZoomPreflightResult | None = None
@@ -274,6 +361,43 @@ class DesktopApplication:
         style.configure("Treeview", rowheight=30)
         style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10))
         style.configure("Status.Treeview", rowheight=30)
+
+    def _show_help(
+        self,
+        topic: str,
+        *,
+        parent: tk.Tk | tk.Toplevel | None = None,
+    ) -> None:
+        title, body = HELP_TOPICS[topic]
+        owner = parent or self.root
+        window = tk.Toplevel(owner)
+        window.title(f"Довідка — {title}")
+        window.geometry("680x440")
+        window.minsize(520, 320)
+        window.transient(owner)
+        ttk.Label(
+            window,
+            text=title,
+            style="Title.TLabel",
+            padding=(18, 16, 18, 8),
+        ).pack(anchor=tk.W)
+        help_text = ScrolledText(
+            window,
+            wrap=tk.WORD,
+            font=("Segoe UI", 11),
+            padx=14,
+            pady=12,
+        )
+        help_text.pack(fill=tk.BOTH, expand=True, padx=18)
+        help_text.insert("1.0", body)
+        help_text.configure(state=tk.DISABLED)
+        ttk.Button(
+            window,
+            text="Закрити",
+            command=window.destroy,
+        ).pack(anchor=tk.E, padx=18, pady=16)
+        window.grab_set()
+        window.focus_set()
 
     def _make_tree_sortable(
         self,
@@ -483,6 +607,11 @@ class DesktopApplication:
             command=self._reconcile_package,
         )
         reconcile_button.pack(side=tk.LEFT, padx=8)
+        ttk.Button(
+            actions,
+            text="Довідка",
+            command=lambda: self._show_help("lessons"),
+        ).pack(side=tk.RIGHT)
         self.action_buttons.extend((self.send_button, reconcile_button))
 
         self.log = ScrolledText(
@@ -559,12 +688,19 @@ class DesktopApplication:
             fill=tk.X, pady=2
         )
 
-        ttk.Button(
+        self.add_lesson_button = ttk.Button(
             parent,
             text="Додати урок до пакета",
             style="Primary.TButton",
             command=self._add_lesson,
-        ).grid(row=7, column=0, columnspan=4, sticky=tk.EW, pady=(12, 0))
+        )
+        self.add_lesson_button.grid(
+            row=7,
+            column=0,
+            columnspan=4,
+            sticky=tk.EW,
+            pady=(12, 0),
+        )
         parent.columnconfigure(1, weight=1)
         parent.columnconfigure(3, weight=1)
         parent.rowconfigure(6, weight=1)
@@ -602,8 +738,17 @@ class DesktopApplication:
         )
         self.preview_files = tk.Listbox(parent, height=7, font=("Segoe UI", 9))
         self.preview_files.pack(fill=tk.BOTH, expand=True)
+        self.preview_files.bind(
+            "<Double-1>",
+            self._open_selected_lesson_file,
+        )
         buttons = ttk.Frame(parent)
         buttons.pack(anchor=tk.E, pady=(8, 0))
+        ttk.Button(
+            buttons,
+            text="Відкрити файл",
+            command=self._open_selected_lesson_file,
+        ).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(
             buttons,
             text="Редагувати вибраний урок",
@@ -616,8 +761,53 @@ class DesktopApplication:
         ).pack(side=tk.LEFT)
 
     def _build_google_tab(self, parent: ttk.Frame) -> None:
+        settings_view = ttk.Frame(parent)
+        settings_view.pack(fill=tk.X)
+        canvas_background = (
+            ttk.Style(self.root).lookup("TFrame", "background") or "#f0f0f0"
+        )
+        self.google_settings_canvas = tk.Canvas(
+            settings_view,
+            height=220,
+            background=canvas_background,
+            highlightthickness=0,
+        )
+        settings_scroll = ttk.Scrollbar(
+            settings_view,
+            orient=tk.VERTICAL,
+            command=self.google_settings_canvas.yview,
+        )
+        self.google_settings_canvas.configure(
+            yscrollcommand=settings_scroll.set,
+        )
+        self.google_settings_canvas.pack(
+            side=tk.LEFT,
+            fill=tk.X,
+            expand=True,
+        )
+        settings_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        settings_content = ttk.Frame(self.google_settings_canvas)
+        settings_window = self.google_settings_canvas.create_window(
+            (0, 0),
+            window=settings_content,
+            anchor=tk.NW,
+        )
+        settings_content.bind(
+            "<Configure>",
+            lambda _event: self.google_settings_canvas.configure(
+                scrollregion=self.google_settings_canvas.bbox("all"),
+            ),
+        )
+        self.google_settings_canvas.bind(
+            "<Configure>",
+            lambda event: self.google_settings_canvas.itemconfigure(
+                settings_window,
+                width=event.width,
+            ),
+        )
+
         connection = ttk.LabelFrame(
-            parent,
+            settings_content,
             text="Підключення Google Calendar",
             padding=10,
         )
@@ -659,7 +849,7 @@ class DesktopApplication:
         ).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
         connection.columnconfigure(1, weight=1)
 
-        filters = ttk.LabelFrame(parent, text="Події", padding=10)
+        filters = ttk.LabelFrame(settings_content, text="Події", padding=10)
         filters.pack(fill=tk.X, pady=(12, 0))
         ttk.Label(filters, text="Календар").grid(
             row=0, column=0, sticky=tk.W, padx=(0, 6), pady=5
@@ -690,7 +880,7 @@ class DesktopApplication:
         filters.columnconfigure(3, weight=1)
 
         zoom = ttk.LabelFrame(
-            parent,
+            settings_content,
             text="Локальні записи Zoom",
             padding=10,
         )
@@ -895,13 +1085,20 @@ class DesktopApplication:
             self._update_status_tree_selection_style,
             add="+",
         )
+        google_footer = ttk.Frame(parent)
+        google_footer.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(
+            google_footer,
+            text="Довідка",
+            command=lambda: self._show_help("calendar"),
+        ).pack(side=tk.LEFT)
         import_button = ttk.Button(
-            parent,
+            google_footer,
             text="Імпортувати вибрану подію в урок",
             style="Primary.TButton",
             command=self._import_google_event,
         )
-        import_button.pack(anchor=tk.E, pady=(10, 0))
+        import_button.pack(side=tk.RIGHT)
         self.action_buttons.extend(
             (
                 browse_button,
@@ -976,6 +1173,11 @@ class DesktopApplication:
             command=self._start_login,
         )
         login_button.grid(row=6, column=1, sticky=tk.W, padx=(10, 0))
+        ttk.Button(
+            parent,
+            text="Довідка",
+            command=lambda: self._show_help("telegram"),
+        ).grid(row=6, column=2, sticky=tk.W, padx=(10, 0))
         self.action_buttons.extend((save_button, login_button))
         ttk.Label(
             parent,
@@ -1422,6 +1624,11 @@ class DesktopApplication:
             text="Закрити",
             command=window.destroy,
         ).pack(side=tk.RIGHT)
+        ttk.Button(
+            buttons,
+            text="Довідка",
+            command=lambda: self._show_help("preflight", parent=window),
+        ).pack(side=tk.RIGHT, padx=6)
         tree.selection_set("0")
         window.grab_set()
 
@@ -1691,6 +1898,7 @@ class DesktopApplication:
         self.missing_zoom_events = list(assembly.missing_events)
         self.zoom_catalog_issues = list(catalog.issues)
         self.lessons = list(assembly.lessons)
+        self._cancel_lesson_edit()
         unresolved_count = (
             len(self.unresolved_zoom_results)
             + len(self.missing_zoom_events)
@@ -1931,6 +2139,11 @@ class DesktopApplication:
             text="Відкласти рішення",
             command=window.destroy,
         ).pack(fill=tk.X, pady=3)
+        ttk.Button(
+            buttons,
+            text="Довідка",
+            command=lambda: self._show_help("missing_zoom", parent=window),
+        ).pack(fill=tk.X, pady=(10, 3))
         window.grab_set()
 
     def _attach_manual_mp4(
@@ -2080,13 +2293,189 @@ class DesktopApplication:
         window.destroy()
         self._rebuild_zoom_batch_after_resolution()
 
+    def _build_zoom_conflict_actions(
+        self,
+        window: tk.Toplevel,
+        result: ZoomMatchResult,
+        event: ParsedCalendarEvent | None,
+    ) -> None:
+        action_panel = ttk.LabelFrame(
+            window,
+            text="Що потрібно зробити",
+            padding=12,
+        )
+        action_panel.pack(fill=tk.X, padx=16, pady=(0, 8))
+        if event is None:
+            instruction = (
+                "Для цього відео не знайдено однозначного уроку. "
+                "Оберіть іншу Calendar-подію або явно позначте, що запис "
+                "не є уроком."
+            )
+        else:
+            difference = (
+                f"{abs(result.start_difference_minutes):g} хв"
+                if result.start_difference_minutes is not None
+                else "невідома"
+            )
+            instruction = (
+                f"Різниця з найближчим уроком — {difference}. "
+                f"Якщо на кадрах {event.student_name}, натисніть "
+                f"«Підтвердити: {event.student_name}». Якщо це інший "
+                "учень — «Обрати інший урок Calendar»."
+            )
+        ttk.Label(
+            action_panel,
+            text=instruction,
+            justify=tk.LEFT,
+            wraplength=940,
+        ).pack(fill=tk.X, pady=(0, 10))
+
+        decisions = ttk.Frame(action_panel)
+        decisions.pack(fill=tk.X)
+        decision_specs: list[tuple[str, Callable[[], None], bool]] = []
+        if event is not None:
+            decision_specs.append(
+                (
+                    f"Підтвердити: {event.student_name}",
+                    lambda: self._confirm_zoom_result(
+                        result,
+                        event,
+                        AssignmentType.MANUALLY_CONFIRMED_TIME,
+                        "Відповідність часу підтверджена користувачем.",
+                        window,
+                    ),
+                    True,
+                )
+            )
+        decision_specs.append(
+            (
+                "Обрати інший урок Calendar",
+                lambda: self._choose_other_calendar_event(result, window),
+                False,
+            )
+        )
+        if result.next_event is not None and event is not None:
+            decision_specs.extend(
+                (
+                    (
+                        "Усе відео поточному учню",
+                        lambda: self._confirm_zoom_result(
+                            result,
+                            event,
+                            AssignmentType.CURRENT_EVENT_FULL_VIDEO,
+                            "Користувач залишив усе відео поточному учню.",
+                            window,
+                        ),
+                        False,
+                    ),
+                    (
+                        "Усе відео наступному учню",
+                        lambda: self._confirm_zoom_result(
+                            result,
+                            result.next_event,
+                            AssignmentType.NEXT_EVENT,
+                            (
+                                "Користувач прив’язав усе відео "
+                                "до наступного уроку."
+                            ),
+                            window,
+                        ),
+                        False,
+                    ),
+                    (
+                        "Розрізати за Calendar",
+                        lambda: self._split_zoom_conflict(
+                            result,
+                            result.split_offset_seconds,
+                            window,
+                        ),
+                        False,
+                    ),
+                    (
+                        "Змінити точку розрізання",
+                        lambda: self._ask_custom_split(result, window),
+                        False,
+                    ),
+                )
+            )
+        decision_specs.extend(
+            (
+                (
+                    "Це не навчальний запис",
+                    lambda: self._resolve_without_event(
+                        result,
+                        ZoomMatchStatus.NOT_A_LESSON,
+                        window,
+                    ),
+                    False,
+                ),
+                (
+                    "Пропустити цей запис",
+                    lambda: self._resolve_without_event(
+                        result,
+                        ZoomMatchStatus.SKIPPED_BY_USER,
+                        window,
+                    ),
+                    False,
+                ),
+                (
+                    "Відкласти — залишити невирішеним",
+                    lambda: self._defer_zoom_result(result, window),
+                    False,
+                ),
+            )
+        )
+        for index, (label, command, primary) in enumerate(decision_specs):
+            ttk.Button(
+                decisions,
+                text=label,
+                command=command,
+                style="Primary.TButton" if primary else "TButton",
+            ).grid(
+                row=index // 3,
+                column=index % 3,
+                sticky=tk.EW,
+                padx=3,
+                pady=3,
+            )
+        for column in range(3):
+            decisions.columnconfigure(column, weight=1)
+
+        utilities = ttk.Frame(action_panel)
+        utilities.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(
+            utilities,
+            text="Відкрити відео",
+            command=lambda: self._open_local_path(result.segment.path),
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            utilities,
+            text="Відкрити Zoom-папку",
+            command=lambda: self._open_local_path(
+                result.segment.source_folder
+            ),
+        ).pack(side=tk.LEFT, padx=6)
+        ttk.Button(
+            utilities,
+            text="Довідка",
+            command=lambda: self._show_help(
+                "zoom_conflict",
+                parent=window,
+            ),
+        ).pack(side=tk.RIGHT)
+
     def _show_zoom_conflict_dialog(
         self,
         result: ZoomMatchResult,
     ) -> None:
         window = tk.Toplevel(self.root)
         window.title("Підтвердьте відповідність часу")
-        window.geometry("980x760")
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        window_width = min(1100, max(720, screen_width - 80))
+        window_height = min(820, max(620, screen_height - 80))
+        window.geometry(f"{window_width}x{window_height}")
+        window.minsize(min(760, window_width), min(600, window_height))
         window.transient(self.root)
         window.protocol(
             "WM_DELETE_WINDOW",
@@ -2121,6 +2510,7 @@ class DesktopApplication:
             justify=tk.LEFT,
             wraplength=920,
         ).pack(fill=tk.X, padx=16, pady=12)
+        self._build_zoom_conflict_actions(window, result, event)
         preview = ttk.Frame(window)
         preview.pack(fill=tk.BOTH, expand=True, padx=16, pady=8)
         images: list[tk.PhotoImage] = []
@@ -2155,6 +2545,13 @@ class DesktopApplication:
                     sticky=tk.NSEW,
                 )
                 image = tk.PhotoImage(file=frame)
+                scale = max(
+                    1,
+                    (image.width() + 419) // 420,
+                    (image.height() + 229) // 230,
+                )
+                if scale > 1:
+                    image = image.subsample(scale)
                 images.append(image)
                 ttk.Label(cell, image=image).pack()
                 ttk.Label(
@@ -2181,104 +2578,6 @@ class DesktopApplication:
                 foreground="#a00000",
             ).pack()
 
-        buttons = ttk.Frame(window, padding=12)
-        buttons.pack(fill=tk.X)
-        if event is not None:
-            ttk.Button(
-                buttons,
-                text="Так, це цей урок",
-                style="Primary.TButton",
-                command=lambda: self._confirm_zoom_result(
-                    result,
-                    event,
-                    AssignmentType.MANUALLY_CONFIRMED_TIME,
-                    "Відповідність часу підтверджена користувачем.",
-                    window,
-                ),
-            ).pack(side=tk.LEFT, padx=3, pady=3)
-        ttk.Button(
-            buttons,
-            text="Обрати інший урок",
-            command=lambda: self._choose_other_calendar_event(
-                result,
-                window,
-            ),
-        ).pack(side=tk.LEFT, padx=3, pady=3)
-        if result.next_event is not None:
-            ttk.Button(
-                buttons,
-                text="Усе відео поточному учню",
-                command=lambda: self._confirm_zoom_result(
-                    result,
-                    event,
-                    AssignmentType.CURRENT_EVENT_FULL_VIDEO,
-                    "Користувач залишив усе відео поточному учню.",
-                    window,
-                ),
-            ).pack(side=tk.LEFT, padx=3, pady=3)
-            ttk.Button(
-                buttons,
-                text="Усе відео наступному учню",
-                command=lambda: self._confirm_zoom_result(
-                    result,
-                    result.next_event,
-                    AssignmentType.NEXT_EVENT,
-                    "Користувач прив’язав усе відео до наступного уроку.",
-                    window,
-                ),
-            ).pack(side=tk.LEFT, padx=3, pady=3)
-            ttk.Button(
-                buttons,
-                text="Розрізати за календарем",
-                command=lambda: self._split_zoom_conflict(
-                    result,
-                    result.split_offset_seconds,
-                    window,
-                ),
-            ).pack(side=tk.LEFT, padx=3, pady=3)
-            ttk.Button(
-                buttons,
-                text="Змінити точку розрізання",
-                command=lambda: self._ask_custom_split(
-                    result,
-                    window,
-                ),
-            ).pack(side=tk.LEFT, padx=3, pady=3)
-        ttk.Button(
-            buttons,
-            text="Це не урок",
-            command=lambda: self._resolve_without_event(
-                result,
-                ZoomMatchStatus.NOT_A_LESSON,
-                window,
-            ),
-        ).pack(side=tk.LEFT, padx=3, pady=3)
-        ttk.Button(
-            buttons,
-            text="Пропустити",
-            command=lambda: self._resolve_without_event(
-                result,
-                ZoomMatchStatus.SKIPPED_BY_USER,
-                window,
-            ),
-        ).pack(side=tk.LEFT, padx=3, pady=3)
-        ttk.Button(
-            buttons,
-            text="Відкласти рішення",
-            command=lambda: self._defer_zoom_result(result, window),
-        ).pack(side=tk.LEFT, padx=3, pady=3)
-        ttk.Button(
-            buttons,
-            text="Відкрити відео",
-            command=lambda: self._open_local_path(result.segment.path),
-        ).pack(side=tk.RIGHT, padx=3)
-        ttk.Button(
-            buttons,
-            text="Відкрити Zoom-папку",
-            command=lambda: self._open_local_path(
-                result.segment.source_folder
-            ),
-        ).pack(side=tk.RIGHT, padx=3)
         window.grab_set()
 
     def _choose_other_calendar_event(
@@ -2349,12 +2648,22 @@ class DesktopApplication:
                 parent,
             )
 
+        chooser_buttons = ttk.Frame(chooser)
+        chooser_buttons.pack(fill=tk.X, padx=10, pady=(0, 10))
         ttk.Button(
-            chooser,
+            chooser_buttons,
+            text="Довідка",
+            command=lambda: self._show_help(
+                "choose_event",
+                parent=chooser,
+            ),
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            chooser_buttons,
             text="Обрати",
             style="Primary.TButton",
             command=choose,
-        ).pack(pady=(0, 10))
+        ).pack(side=tk.RIGHT)
         tree.selection_set("0")
         chooser.grab_set()
 
@@ -2567,6 +2876,7 @@ class DesktopApplication:
             ignored_event_ids=frozenset(self.ignored_event_ids),
         )
         self.lessons = list(assembly.lessons)
+        self._cancel_lesson_edit()
         self.unresolved_zoom_results = list(assembly.unresolved_results)
         self.missing_zoom_events = list(assembly.missing_events)
         unresolved_count = (
@@ -2623,6 +2933,7 @@ class DesktopApplication:
             self._show_error(error)
             return
         self.pending_calendar_form = form
+        self._cancel_lesson_edit()
         self.event_id_var.set(form.calendar_event_id)
         self.start_var.set(form.event_start)
         self.student_id_var.set(form.student_id)
@@ -2812,23 +3123,25 @@ class DesktopApplication:
                 batch_id=self.batch_var.get(),
                 form=form,
             )
-            if any(
-                item.calendar_event_id == lesson.calendar_event_id
-                for item in self.lessons
-            ):
-                raise ValueError("Урок із цим Calendar event ID уже доданий")
+            updated_lessons = save_lesson_to_batch(
+                lessons=tuple(self.lessons),
+                lesson=lesson,
+                editing_calendar_event_id=self.editing_calendar_event_id,
+            )
         except Exception as error:
             self._show_error(error)
             return
-        self.lessons.append(lesson)
-        self.lessons.sort(key=lambda item: (item.event_start, item.calendar_event_id))
+        was_editing = self.editing_calendar_event_id is not None
+        self.lessons = list(updated_lessons)
+        self._cancel_lesson_edit()
         self._refresh_lessons()
         self.pending_video_paths.clear()
         self.pending_calendar_form = None
         self.no_recording_var.set(False)
         self._refresh_pending_files()
         self.event_id_var.set(f"event-{datetime.now():%Y%m%d-%H%M%S}")
-        self._log(f"Додано урок: {lesson.caption}")
+        action = "Оновлено" if was_editing else "Додано"
+        self._log(f"{action} урок: {lesson.caption}")
 
     def _refresh_lessons(self) -> None:
         self.lesson_tree.delete(*self.lesson_tree.get_children())
@@ -2868,12 +3181,30 @@ class DesktopApplication:
         for index, path in enumerate(lesson.ordered_video_paths, start=1):
             self.preview_files.insert(tk.END, f"{index}. {path}")
 
-    def _edit_lesson(self) -> None:
-        """Move the selected lesson back into the editor.
+    def _open_selected_lesson_file(self, _event: object = None) -> None:
+        lesson_selection = self.lesson_tree.selection()
+        if not lesson_selection:
+            self._show_error(ValueError("Виберіть урок у списку."))
+            return
+        file_selection = self.preview_files.curselection()
+        if not file_selection:
+            self._show_error(
+                ValueError("Виберіть файл у блоці «Файли вибраного уроку».")
+            )
+            return
+        lesson = self.lessons[int(lesson_selection[0])]
+        file_index = int(file_selection[0])
+        if not 0 <= file_index < len(lesson.ordered_video_paths):
+            self._show_error(ValueError("Вибраний файл більше не доступний."))
+            return
+        self._open_local_path(lesson.ordered_video_paths[file_index])
 
-        It leaves the batch while being edited, so re-adding it is not blocked
-        by its own Calendar event ID.
-        """
+    def _cancel_lesson_edit(self) -> None:
+        self.editing_calendar_event_id = None
+        self.add_lesson_button.configure(text="Додати урок до пакета")
+
+    def _edit_lesson(self) -> None:
+        """Copy the selected lesson into the editor without removing it."""
         selection = self.lesson_tree.selection()
         if not selection:
             return
@@ -2882,8 +3213,10 @@ class DesktopApplication:
             "У редакторі вже є вибрані відео. Замінити їх уроком із пакета?",
         ):
             return
-        lesson = self.lessons.pop(int(selection[0]))
+        lesson = self.lessons[int(selection[0])]
         form = form_from_lesson(lesson)
+        self.editing_calendar_event_id = lesson.calendar_event_id
+        self.add_lesson_button.configure(text="Зберегти зміни уроку")
         self.event_id_var.set(form.calendar_event_id)
         self.start_var.set(form.event_start)
         self.student_id_var.set(form.student_id)
@@ -2897,8 +3230,6 @@ class DesktopApplication:
         )
         self.pending_video_paths = list(form.video_paths)
         self._refresh_pending_files()
-        self._refresh_lessons()
-        self.preview_files.delete(0, tk.END)
         if lesson.details is None:
             self._log(
                 "Урок мав власний caption — заповніть поля учня заново "
@@ -2911,7 +3242,9 @@ class DesktopApplication:
         selection = self.lesson_tree.selection()
         if not selection:
             return
-        self.lessons.pop(int(selection[0]))
+        removed = self.lessons.pop(int(selection[0]))
+        if removed.calendar_event_id == self.editing_calendar_event_id:
+            self._cancel_lesson_edit()
         self._refresh_lessons()
         self.preview_files.delete(0, tk.END)
 
@@ -2939,6 +3272,7 @@ class DesktopApplication:
         self.batch_var.set(manifest.batch_id)
         self.target_var.set(str(manifest.target_peer))
         self.lessons = list(manifest.lessons)
+        self._cancel_lesson_edit()
         self._refresh_lessons()
         self._log(f"Відкрито пакет: {path}")
 
