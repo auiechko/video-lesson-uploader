@@ -52,6 +52,7 @@ from .models import Lesson, LessonSendMode, SendStatus
 from .persistence import SQLiteSendItemRepository
 from .planning import plan_albums
 from .telegram_desktop import (
+    CodeRequest,
     LoginResult,
     TelegramAuthService,
     TelegramDesktopService,
@@ -156,7 +157,10 @@ HELP_TOPICS: Mapping[str, tuple[str, str]] = {
             "API hash зберігається тільки в системному сховищі паролів "
             "Windows і після повторного відкриття не показується.\n\n"
             "Спочатку збережіть налаштування, потім натисніть "
-            "«Увійти в Telegram». Код входу й пароль 2FA не записуються "
+            "«Увійти в Telegram». Якщо код не приходить, натисніть "
+            "«Увійти через QR-код» і відскануйте його в Telegram на "
+            "телефоні: Налаштування → Пристрої → «Під'єднати пристрій». "
+            "Код входу й пароль 2FA не записуються "
             "у config, SQLite або журнали."
         ),
     ),
@@ -1227,18 +1231,26 @@ class DesktopApplication:
             command=self._save_settings,
         )
         save_button.grid(row=6, column=0, sticky=tk.W)
+        login_buttons = ttk.Frame(parent)
+        login_buttons.grid(row=6, column=1, sticky=tk.W, padx=(10, 0))
         login_button = ttk.Button(
-            parent,
+            login_buttons,
             text="Увійти в Telegram",
             command=self._start_login,
         )
-        login_button.grid(row=6, column=1, sticky=tk.W, padx=(10, 0))
+        login_button.pack(side=tk.LEFT)
+        qr_login_button = ttk.Button(
+            login_buttons,
+            text="Увійти через QR-код",
+            command=self._start_qr_login,
+        )
+        qr_login_button.pack(side=tk.LEFT, padx=(10, 0))
         ttk.Button(
             parent,
             text="Довідка",
             command=lambda: self._show_help("telegram"),
         ).grid(row=6, column=2, sticky=tk.W, padx=(10, 0))
-        self.action_buttons.extend((save_button, login_button))
+        self.action_buttons.extend((save_button, login_button, qr_login_button))
         ttk.Label(
             parent,
             text=(
@@ -3395,8 +3407,8 @@ class DesktopApplication:
                 api_hash,
                 profile_id=profile_id,
             ),
-            lambda phone_hash: self._ask_login_code(
-                service, config, api_hash, phone_hash
+            lambda request: self._ask_login_code(
+                service, config, api_hash, request
             ),
             "Надсилання коду Telegram…",
         )
@@ -3406,14 +3418,35 @@ class DesktopApplication:
         service: TelegramAuthService,
         config: Any,
         api_hash: str,
-        phone_hash: str,
+        request: CodeRequest,
     ) -> None:
+        self._log(f"Telegram надіслав код: {request.delivery}")
         code = simpledialog.askstring(
             APP_TITLE,
-            "Введіть код, який надіслав Telegram:",
+            f"Telegram надіслав код: {request.delivery}.\n\n"
+            "Введіть код:",
             parent=self.root,
         )
         if not code:
+            if request.next_delivery and messagebox.askyesno(
+                APP_TITLE,
+                "Код не прийшов? Надіслати його іншим способом: "
+                f"{request.next_delivery}?",
+                parent=self.root,
+            ):
+                self._run_async(
+                    service.resend_code(
+                        config,
+                        api_hash,
+                        phone_code_hash=request.phone_code_hash,
+                        profile_id=self.profile_var.get(),
+                    ),
+                    lambda resent: self._ask_login_code(
+                        service, config, api_hash, resent
+                    ),
+                    "Повторне надсилання коду Telegram…",
+                )
+                return
             self._set_status("Вхід скасовано")
             return
         self._run_async(
@@ -3421,7 +3454,7 @@ class DesktopApplication:
                 config,
                 api_hash,
                 code=code,
-                phone_code_hash=phone_hash,
+                phone_code_hash=request.phone_code_hash,
                 profile_id=self.profile_var.get(),
             ),
             lambda result: self._finish_login(service, config, api_hash, result),
@@ -3457,6 +3490,96 @@ class DesktopApplication:
             lambda _result: self._login_success(),
             "Перевірка 2FA…",
         )
+
+    def _start_qr_login(self) -> None:
+        if self.busy:
+            self._log("Зачекайте: попередня операція ще виконується.")
+            return
+        if not self._save_settings(quiet=True):
+            return
+        try:
+            import qrcode
+
+            profile_id = self.profile_var.get()
+            config = self.settings.load(profile_id).config
+            api_hash = self.settings.require_api_hash(profile_id)
+            factory, password_error = telethon_components()
+            service = TelegramAuthService(
+                factory,
+                password_required_error=password_error,
+            )
+        except Exception as error:
+            self._show_error(error)
+            return
+
+        cancel = threading.Event()
+        window = tk.Toplevel(self.root)
+        window.title(f"{APP_TITLE} — вхід через QR-код")
+        window.transient(self.root)
+        window.resizable(False, False)
+        ttk.Label(
+            window,
+            text=(
+                "Відкрийте Telegram на телефоні: Налаштування → Пристрої → "
+                "«Під'єднати пристрій» і відскануйте цей код.\n"
+                "Код оновлюється автоматично кожні ~30 секунд."
+            ),
+            wraplength=360,
+            justify=tk.CENTER,
+        ).pack(padx=16, pady=(16, 8))
+        canvas = tk.Canvas(window, highlightthickness=0, background="white")
+        canvas.pack(padx=16, pady=8)
+        ttk.Button(window, text="Скасувати", command=cancel.set).pack(
+            pady=(8, 16)
+        )
+        window.protocol("WM_DELETE_WINDOW", cancel.set)
+
+        def draw(url: str) -> None:
+            if not window.winfo_exists():
+                return
+            code = qrcode.QRCode(border=4)
+            code.add_data(url)
+            code.make(fit=True)
+            matrix = code.get_matrix()
+            cell = max(4, 300 // len(matrix))
+            size = cell * len(matrix)
+            canvas.configure(width=size, height=size)
+            canvas.delete("all")
+            for y, row in enumerate(matrix):
+                for x, dark in enumerate(row):
+                    if dark:
+                        canvas.create_rectangle(
+                            x * cell,
+                            y * cell,
+                            (x + 1) * cell,
+                            (y + 1) * cell,
+                            fill="black",
+                            width=0,
+                        )
+
+        def close() -> None:
+            if window.winfo_exists():
+                window.destroy()
+
+        async def login() -> LoginResult:
+            try:
+                return await service.qr_login(
+                    config,
+                    api_hash,
+                    on_qr=lambda url: self.root.after(0, partial(draw, url)),
+                    cancelled=cancel.is_set,
+                    profile_id=profile_id,
+                )
+            finally:
+                self.root.after(0, close)
+
+        def finish(result: LoginResult) -> None:
+            if result is LoginResult.CANCELLED:
+                self._set_status("Вхід скасовано")
+                return
+            self._finish_login(service, config, api_hash, result)
+
+        self._run_async(login(), finish, "Очікування сканування QR-коду…")
 
     def _login_success(self) -> None:
         self._log("Telegram-авторизація успішна.")
