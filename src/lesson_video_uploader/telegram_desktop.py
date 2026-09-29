@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import replace
+from contextlib import suppress
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
@@ -31,6 +33,62 @@ class TelegramConnectionUnavailable(RuntimeError):
 class LoginResult(StrEnum):
     AUTHORIZED = "AUTHORIZED"
     PASSWORD_REQUIRED = "PASSWORD_REQUIRED"
+    CANCELLED = "CANCELLED"
+
+
+_CODE_DELIVERY = {
+    "App": "у застосунок Telegram — чат «Telegram» на іншому пристрої, "
+    "де ви вже увійшли",
+    "Sms": "SMS",
+    "SmsWord": "SMS (слово замість цифр)",
+    "SmsPhrase": "SMS (фраза замість цифр)",
+    "FirebaseSms": "SMS",
+    "FragmentSms": "SMS через Fragment",
+    "Call": "голосовим дзвінком",
+    "FlashCall": "дзвінком-скиданням (код — цифри номера, що дзвонив)",
+    "MissedCall": "пропущеним дзвінком (код — останні цифри номера)",
+    "EmailCode": "на пошту",
+    "SetUpEmailRequired": "нікуди: Telegram вимагає спершу прив'язати "
+    "пошту для входу в офіційному застосунку",
+}
+
+
+def describe_code_type(code_type: object | None) -> str | None:
+    """Human-readable channel for auth.SentCodeType*/auth.CodeType*."""
+    if code_type is None:
+        return None
+    name = type(code_type).__name__
+    key = name.removeprefix("SentCodeType").removeprefix("CodeType")
+    description = _CODE_DELIVERY.get(key)
+    if description is None:
+        return f"невідомим способом ({name})"
+    email_pattern = getattr(code_type, "email_pattern", None)
+    if email_pattern:
+        description = f"{description} {email_pattern}"
+    return description
+
+
+@dataclass(frozen=True)
+class CodeRequest:
+    phone_code_hash: str
+    delivery: str
+    next_delivery: str | None = None
+
+
+def _code_request(sent: Any) -> CodeRequest:
+    if type(sent).__name__ == "SentCodePaymentRequired":
+        raise ValueError(
+            "Telegram вимагає оплату за надсилання коду на цей номер. "
+            "Увійдіть через офіційний застосунок Telegram і повторіть."
+        )
+    return CodeRequest(
+        phone_code_hash=sent.phone_code_hash,
+        delivery=(
+            describe_code_type(getattr(sent, "type", None))
+            or "невідомим способом"
+        ),
+        next_delivery=describe_code_type(getattr(sent, "next_type", None)),
+    )
 
 
 class DesktopTelethonClient(Protocol):
@@ -139,7 +197,7 @@ class TelegramAuthService:
         api_hash: str,
         *,
         profile_id: str = "main",
-    ) -> str:
+    ) -> CodeRequest:
         if not config.phone:
             raise ValueError("Спочатку збережіть номер телефону Telegram")
         client = self._client(config, api_hash, profile_id)
@@ -148,7 +206,79 @@ class TelegramAuthService:
                 client,
                 lambda: client.send_code_request(config.phone),  # type: ignore[attr-defined]
             )
-            return sent.phone_code_hash
+            return _code_request(sent)
+        finally:
+            await _safe_disconnect(client)
+
+    async def resend_code(
+        self,
+        config: AppConfig,
+        api_hash: str,
+        *,
+        phone_code_hash: str,
+        profile_id: str = "main",
+    ) -> CodeRequest:
+        """Ask Telegram to deliver the pending code via its next channel."""
+        from telethon.tl.functions.auth import ResendCodeRequest
+
+        client = self._client(config, api_hash, profile_id)
+        try:
+            sent = await _run_connected(
+                client,
+                lambda: client(  # type: ignore[operator]
+                    ResendCodeRequest(config.phone, phone_code_hash)
+                ),
+            )
+            return _code_request(sent)
+        finally:
+            await _safe_disconnect(client)
+
+    async def qr_login(
+        self,
+        config: AppConfig,
+        api_hash: str,
+        *,
+        on_qr: Callable[[str], object],
+        cancelled: Callable[[], bool] = lambda: False,
+        profile_id: str = "main",
+        max_wait: float = 300.0,
+        poll_interval: float = 0.5,
+    ) -> LoginResult:
+        """Log in by scanning a tg://login QR code from another device.
+
+        ``on_qr`` receives every new QR URL (tokens expire in ~30 s and are
+        recreated). ``cancelled`` is polled so the UI can abort the wait.
+        """
+        client = self._client(config, api_hash, profile_id)
+        try:
+            if await _run_connected(client, client.is_user_authorized):
+                return LoginResult.AUTHORIZED
+            qr = await _run_connected(client, client.qr_login)  # type: ignore[attr-defined]
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + max_wait
+            while True:
+                on_qr(qr.url)
+                waiter = asyncio.ensure_future(qr.wait())
+                while not waiter.done():
+                    if cancelled() or loop.time() >= deadline:
+                        waiter.cancel()
+                        with suppress(asyncio.CancelledError, Exception):
+                            await waiter
+                        if cancelled():
+                            return LoginResult.CANCELLED
+                        raise TimeoutError(
+                            "QR-код не відскановано вчасно. "
+                            "Спробуйте ще раз."
+                        )
+                    await asyncio.wait({waiter}, timeout=poll_interval)
+                try:
+                    waiter.result()
+                except asyncio.TimeoutError:
+                    await qr.recreate()
+                    continue
+                except self.password_required_error:
+                    return LoginResult.PASSWORD_REQUIRED
+                return LoginResult.AUTHORIZED
         finally:
             await _safe_disconnect(client)
 
