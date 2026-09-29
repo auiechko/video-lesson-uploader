@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from dataclasses import replace
@@ -7,6 +8,14 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+
+from telethon.tl.functions.auth import ResendCodeRequest
+from telethon.tl.types.auth import (
+    CodeTypeSms,
+    SentCodeTypeApp,
+    SentCodeTypeEmailCode,
+    SentCodeTypeSms,
+)
 
 from lesson_video_uploader.calendar_rules import (
     BatchRevalidationRequired,
@@ -23,6 +32,7 @@ from lesson_video_uploader.telegram_desktop import (
     TelegramConnectionUnavailable,
     TelegramDesktopService,
     TelegramLoginRequired,
+    describe_code_type,
 )
 
 
@@ -51,6 +61,10 @@ class FakeClient:
         self.send_file = AsyncMock()
         self.get_messages = AsyncMock(return_value=[])
         self.get_entity = AsyncMock(return_value=SimpleNamespace(id=999))
+        self.invoke = AsyncMock()
+
+    async def __call__(self, request: object) -> object:
+        return await self.invoke(request)
 
 
 class TelegramAuthServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -66,9 +80,214 @@ class TelegramAuthServiceTests(unittest.IsolatedAsyncioTestCase):
             "api-hash",
         )
 
-        self.assertEqual(result, "phone-hash")
+        self.assertEqual(result.phone_code_hash, "phone-hash")
         client.send_code_request.assert_awaited_once_with("+380991234567")
         client.disconnect.assert_awaited_once()
+
+    async def test_request_code_reports_delivery_channel(self) -> None:
+        client = FakeClient()
+        client.send_code_request.return_value = SimpleNamespace(
+            phone_code_hash="phone-hash",
+            type=SentCodeTypeApp(length=5),
+            next_type=CodeTypeSms(),
+        )
+        service = TelegramAuthService(
+            lambda **_: client,
+            password_required_error=PasswordNeeded,
+        )
+
+        result = await service.request_code(
+            AppConfig(api_id=123, phone="+380991234567"),
+            "api-hash",
+        )
+
+        self.assertIn("чат «Telegram»", result.delivery)
+        self.assertEqual(result.next_delivery, "SMS")
+
+    async def test_request_code_describes_email_delivery(self) -> None:
+        client = FakeClient()
+        client.send_code_request.return_value = SimpleNamespace(
+            phone_code_hash="phone-hash",
+            type=SentCodeTypeEmailCode(email_pattern="a***@gmail.com", length=6),
+            next_type=None,
+        )
+        service = TelegramAuthService(
+            lambda **_: client,
+            password_required_error=PasswordNeeded,
+        )
+
+        result = await service.request_code(
+            AppConfig(api_id=123, phone="+380991234567"),
+            "api-hash",
+        )
+
+        self.assertIn("a***@gmail.com", result.delivery)
+        self.assertIsNone(result.next_delivery)
+
+    async def test_resend_code_uses_previous_hash(self) -> None:
+        client = FakeClient()
+        client.invoke.return_value = SimpleNamespace(
+            phone_code_hash="new-hash",
+            type=SentCodeTypeSms(length=5),
+            next_type=None,
+        )
+        service = TelegramAuthService(
+            lambda **_: client,
+            password_required_error=PasswordNeeded,
+        )
+
+        result = await service.resend_code(
+            AppConfig(api_id=123, phone="+380991234567"),
+            "api-hash",
+            phone_code_hash="phone-hash",
+        )
+
+        request = client.invoke.await_args.args[0]
+        self.assertIsInstance(request, ResendCodeRequest)
+        self.assertEqual(request.phone_number, "+380991234567")
+        self.assertEqual(request.phone_code_hash, "phone-hash")
+        self.assertEqual(result.phone_code_hash, "new-hash")
+        self.assertEqual(result.delivery, "SMS")
+        client.disconnect.assert_awaited_once()
+
+    def _qr_service(self, client: FakeClient) -> TelegramAuthService:
+        client.is_user_authorized.return_value = False
+        return TelegramAuthService(
+            lambda **_: client,
+            password_required_error=PasswordNeeded,
+        )
+
+    async def test_qr_login_authorizes_after_scan(self) -> None:
+        client = FakeClient()
+        qr = SimpleNamespace(
+            url="tg://login?token=one",
+            wait=AsyncMock(return_value=SimpleNamespace(id=1)),
+            recreate=AsyncMock(),
+        )
+        client.qr_login = AsyncMock(return_value=qr)
+        shown: list[str] = []
+
+        result = await self._qr_service(client).qr_login(
+            AppConfig(api_id=123, phone="+380991234567"),
+            "api-hash",
+            on_qr=shown.append,
+        )
+
+        self.assertEqual(result, LoginResult.AUTHORIZED)
+        self.assertEqual(shown, ["tg://login?token=one"])
+        client.disconnect.assert_awaited_once()
+
+    async def test_qr_login_recreates_expired_token(self) -> None:
+        client = FakeClient()
+        qr = SimpleNamespace(url="tg://login?token=one")
+
+        async def recreate() -> None:
+            qr.url = "tg://login?token=two"
+
+        qr.wait = AsyncMock(side_effect=[asyncio.TimeoutError(), None])
+        qr.recreate = AsyncMock(side_effect=recreate)
+        client.qr_login = AsyncMock(return_value=qr)
+        shown: list[str] = []
+
+        result = await self._qr_service(client).qr_login(
+            AppConfig(api_id=123, phone="+380991234567"),
+            "api-hash",
+            on_qr=shown.append,
+        )
+
+        self.assertEqual(result, LoginResult.AUTHORIZED)
+        self.assertEqual(
+            shown,
+            ["tg://login?token=one", "tg://login?token=two"],
+        )
+
+    async def test_qr_login_reports_two_factor_requirement(self) -> None:
+        client = FakeClient()
+        qr = SimpleNamespace(
+            url="tg://login?token=one",
+            wait=AsyncMock(side_effect=PasswordNeeded()),
+            recreate=AsyncMock(),
+        )
+        client.qr_login = AsyncMock(return_value=qr)
+
+        result = await self._qr_service(client).qr_login(
+            AppConfig(api_id=123, phone="+380991234567"),
+            "api-hash",
+            on_qr=lambda _url: None,
+        )
+
+        self.assertEqual(result, LoginResult.PASSWORD_REQUIRED)
+
+    async def test_qr_login_stops_when_cancelled(self) -> None:
+        client = FakeClient()
+
+        async def never_scanned() -> None:
+            await asyncio.Event().wait()
+
+        qr = SimpleNamespace(
+            url="tg://login?token=one",
+            wait=never_scanned,
+            recreate=AsyncMock(),
+        )
+        client.qr_login = AsyncMock(return_value=qr)
+        shown: list[str] = []
+
+        result = await self._qr_service(client).qr_login(
+            AppConfig(api_id=123, phone="+380991234567"),
+            "api-hash",
+            on_qr=shown.append,
+            cancelled=lambda: bool(shown),
+            poll_interval=0.01,
+        )
+
+        self.assertEqual(result, LoginResult.CANCELLED)
+        client.disconnect.assert_awaited_once()
+
+    async def test_qr_login_times_out(self) -> None:
+        client = FakeClient()
+
+        async def never_scanned() -> None:
+            await asyncio.Event().wait()
+
+        client.qr_login = AsyncMock(return_value=SimpleNamespace(
+            url="tg://login?token=one",
+            wait=never_scanned,
+            recreate=AsyncMock(),
+        ))
+
+        with self.assertRaises(TimeoutError):
+            await self._qr_service(client).qr_login(
+                AppConfig(api_id=123, phone="+380991234567"),
+                "api-hash",
+                on_qr=lambda _url: None,
+                max_wait=0.05,
+                poll_interval=0.01,
+            )
+        client.disconnect.assert_awaited_once()
+
+    async def test_qr_login_skips_when_already_authorized(self) -> None:
+        client = FakeClient()
+        client.qr_login = AsyncMock()
+        service = TelegramAuthService(
+            lambda **_: client,
+            password_required_error=PasswordNeeded,
+        )
+
+        result = await service.qr_login(
+            AppConfig(api_id=123, phone="+380991234567"),
+            "api-hash",
+            on_qr=lambda _url: None,
+        )
+
+        self.assertEqual(result, LoginResult.AUTHORIZED)
+        client.qr_login.assert_not_awaited()
+
+    def test_describe_code_type_falls_back_to_raw_name(self) -> None:
+        self.assertEqual(
+            describe_code_type(SimpleNamespace()),
+            "невідомим способом (SimpleNamespace)",
+        )
+        self.assertIsNone(describe_code_type(None))
 
     async def test_verify_code_reports_two_factor_requirement(self) -> None:
         client = FakeClient()
